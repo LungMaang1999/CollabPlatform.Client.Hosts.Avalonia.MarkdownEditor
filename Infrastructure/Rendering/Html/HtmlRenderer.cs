@@ -10,7 +10,6 @@ namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Ren
 
 public sealed class HtmlRenderer : IDocumentRenderer
 {
-    private static readonly string[] HeadingTags = { "h1", "h1", "h2", "h3", "h4", "h5", "h6" };
     private static readonly HashSet<string> AllowedUriSchemes = new(StringComparer.OrdinalIgnoreCase)
     {
         "http", "https", "mailto", "tel"
@@ -56,7 +55,7 @@ public sealed class HtmlRenderer : IDocumentRenderer
                     break;
                 case NodeType.Heading:
                     var level = Math.Clamp(node.Level ?? 1, 1, 6);
-                    RenderBlock(node, HeadingTags[level], html, diagnostics);
+                    RenderBlock(node, $"h{level}", html, diagnostics);
                     break;
                 case NodeType.Paragraph:
                     RenderBlock(node, "p", html, diagnostics);
@@ -137,9 +136,13 @@ public sealed class HtmlRenderer : IDocumentRenderer
         }
     }
 
-    private void RenderTableCell(MarkdownNode node, StringBuilder html, List<DiagnosticMessage> diagnostics)
+    private void RenderTableCell(
+        MarkdownNode node,
+        StringBuilder html,
+        List<DiagnosticMessage> diagnostics)
     {
         var tag = node.IsTableHeader ? "th" : "td";
+
         html.Append('<').Append(tag);
         AppendNodeAttributes(node, html);
         AppendStyle(node, html);
@@ -148,16 +151,18 @@ public sealed class HtmlRenderer : IDocumentRenderer
         for (int i = 0; i < node.Children.Count; i++)
         {
             var child = node.Children[i];
+
+            // 表格单元格中的段落不能输出嵌套的 <p>，但必须继续渲染其子节点。
             if (child.Type == NodeType.Paragraph)
             {
-                if (child.Children.Count == 0) html.Append(WebUtility.HtmlEncode(child.Text));
-                else RenderChildren(child, html, diagnostics);
+                RenderChildren(child, html, diagnostics);
             }
             else
             {
                 RenderNode(child, html, diagnostics);
             }
         }
+
         html.Append("</").Append(tag).Append('>');
     }
 
@@ -190,18 +195,27 @@ public sealed class HtmlRenderer : IDocumentRenderer
 
     private static void RenderCodeBlock(MarkdownNode node, StringBuilder html)
     {
-        html.Append("<pre");
-        AppendNodeAttributes(node, html);
-        html.Append("><code>");
+        var code = new StringBuilder();
+
         if (node.Children.Count == 0)
         {
-            html.Append(WebUtility.HtmlEncode(node.Text));
+            code.Append(node.Text);
         }
         else
         {
             for (int i = 0; i < node.Children.Count; i++)
-                html.Append(WebUtility.HtmlEncode(node.Children[i].Text));
+            {
+                code.Append(node.Children[i].Text);
+            }
         }
+
+        // 只移除代码块末尾的换行，保留代码内部的换行和缩进。
+        var codeText = code.ToString().TrimEnd('\r', '\n');
+
+        html.Append("<pre");
+        AppendNodeAttributes(node, html);
+        html.Append("><code>");
+        html.Append(WebUtility.HtmlEncode(codeText));
         html.Append("</code></pre>");
     }
 

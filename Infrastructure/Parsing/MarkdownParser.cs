@@ -35,6 +35,8 @@ public sealed class MarkdownParser : IMarkdownParser
         if (_options.EnableFootnotes) pipelineBuilder.UseFootnotes();
         if (_options.EnableYamlFrontMatter) pipelineBuilder.UseYamlFrontMatter();
 
+        pipelineBuilder.UseEmphasisExtras();
+
         _pipeline = pipelineBuilder.Build();
     }
 

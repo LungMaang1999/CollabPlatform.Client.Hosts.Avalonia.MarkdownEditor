@@ -85,28 +85,50 @@ public sealed class MarkdigToNodeConverter
                 return quoteNode;
 
             case Table tableBlock:
-                var tableNode = _nodeFactory.Create(NodeType.Table, NodeCategory.Container, range: range);
+                var tableNode = _nodeFactory.Create(
+                    NodeType.Table,
+                    NodeCategory.Container,
+                    range: range);
+
                 foreach (var rowObj in tableBlock)
                 {
-                    if (rowObj is TableRow rowBlock)
+                    if (rowObj is not TableRow rowBlock)
                     {
-                        var rowNode = _nodeFactory.Create(NodeType.TableRow, NodeCategory.Container, range: ExtractSourceRange(rowBlock));
-                        foreach (var cellObj in rowBlock)
-                        {
-                            if (cellObj is TableCell cellBlock)
-                            {
-                                var cellNode = _nodeFactory.Create(NodeType.TableCell, NodeCategory.Container, range: ExtractSourceRange(cellBlock));
-                                cellNode.IsTableHeader = rowBlock.IsHeader;
-                                var cellChildren = ConvertBlocks(cellBlock, diagnostics);
-                                foreach (var cc in cellChildren) cellNode.AddChild(cc);
-                                rowNode.AddChild(cellNode);
-                            }
-                        }
-                        tableNode.AddChild(rowNode);
+                        continue;
                     }
-                }
-                return tableNode;
 
+                    var rowNode = _nodeFactory.Create(
+                        NodeType.TableRow,
+                        NodeCategory.Container,
+                        range: ExtractSourceRange(rowBlock));
+
+                    foreach (var cellObj in rowBlock)
+                    {
+                        if (cellObj is not TableCell cellBlock)
+                        {
+                            continue;
+                        }
+
+                        var cellNode = _nodeFactory.Create(
+                            NodeType.TableCell,
+                            NodeCategory.Container,
+                            range: ExtractSourceRange(cellBlock));
+
+                        cellNode.IsTableHeader = rowBlock.IsHeader;
+
+                        var cellChildren = ConvertBlocks(cellBlock, diagnostics);
+                        foreach (var child in cellChildren)
+                        {
+                            cellNode.AddChild(child);
+                        }
+
+                        rowNode.AddChild(cellNode);
+                    }
+
+                    tableNode.AddChild(rowNode);
+                }
+
+                return tableNode;
             case FencedCodeBlock codeBlock:
                 var codeText = string.Join("\n", codeBlock.Lines.Lines.Select(l => l.ToString()));
                 var codeNode = _nodeFactory.Create(NodeType.CodeBlock, NodeCategory.Block, text: codeText, range: range);
@@ -154,17 +176,20 @@ public sealed class MarkdigToNodeConverter
                     break;
 
                 case EmphasisInline emphasis:
-                    NodeType inlineType;
-                    if (emphasis.DelimiterChar == '~')
+                    var inlineType = emphasis.DelimiterChar switch
                     {
-                        inlineType = NodeType.Delete;
-                    }
-                    else
-                    {
-                        inlineType = (emphasis.DelimiterCount == 2) ? NodeType.Strong : NodeType.Emphasis;
-                    }
+                        '~' => NodeType.Delete,
+                        '*' or '_' when emphasis.DelimiterCount >= 2 => NodeType.Strong,
+                        '*' or '_' => NodeType.Emphasis,
+                        _ => NodeType.Emphasis
+                    };
 
-                    var inlineNode = _nodeFactory.Create(inlineType, NodeCategory.Inline, range: range);
+                    var inlineNode = _nodeFactory.Create(
+                        inlineType,
+                        NodeCategory.Inline,
+                        range: range);
+
+                    // 必须递归处理内部内容，否则 <del>、<strong> 或 <em> 只有标签而没有文本。
                     ProcessInlines(emphasis, inlineNode, diagnostics);
                     parentNode.AddChild(inlineNode);
                     break;

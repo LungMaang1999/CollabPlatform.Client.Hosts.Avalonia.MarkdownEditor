@@ -1,5 +1,6 @@
 ﻿using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using Avalonia.Threading;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Documents;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Editing;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Rendering;
@@ -30,6 +31,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
     private CancellationTokenSource? _previewCts;
     private readonly TimeSpan _previewDebounceDelay = TimeSpan.FromMilliseconds(150);
     private bool _isDisposed;
+    private long _previewVersion;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -92,7 +94,20 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         _documentService.CurrentDocumentChanged += OnCurrentDocumentChanged;
         _documentService.HasUnsavedChangesChanged += OnHasUnsavedChangesChanged;
     }
+    private void EnsureEditableDocument()
+    {
+        if (ActiveDocument is not null)
+            return;
 
+        var document = new MarkdownDocument
+        {
+            FilePath = string.Empty
+        };
+
+        ActiveDocument = new DocumentViewModel(document);
+        _activeRenderer = _rendererFactory.Create(document);
+        ErrorMessage = null;
+    }
     private void OnCommandStateChanged(object? sender, EventArgs e)
     {
         RunOnUIThread(() =>
@@ -174,14 +189,42 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    public void ExecuteTextChange(SourceRange range, string replacement)
+    public void ExecuteTextChange(SourceRange range, string? replacement)
     {
-        if (ActiveDocument is null) return;
-        var cmd = new ChangeTextCommand(ActiveDocument.Document, _editApplier, _sourceEditor, range, replacement);
+        ArgumentNullException.ThrowIfNull(range);
+
+        EnsureEditableDocument();
+
+        var document = ActiveDocument!.Document;
+
+        var cmd = new ChangeTextCommand(document,_editApplier,_sourceEditor,range,replacement ?? string.Empty);
+
         _commandManager.Execute(cmd);
         ScheduleUpdatePreview();
-    }
 
+        OnPropertyChanged(nameof(IsModified));
+    }
+    public void ApplySourceText(string? source)
+    {
+        EnsureEditableDocument();
+
+        source ??= string.Empty;
+
+        var document = ActiveDocument!.Document;
+        var currentSource = document.SourceMarkdown;
+
+        if (string.Equals(
+                currentSource,
+                source,
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var fullDocumentRange = CreateFullDocumentRange(currentSource);
+
+        ExecuteTextChange(fullDocumentRange, source);
+    }
     public void ExecuteHeadingChange(MarkdownNode headingNode, int newLevel)
     {
         if (ActiveDocument is null) return;
@@ -204,12 +247,17 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
 
     public void ScheduleUpdatePreview(bool immediate = false)
     {
-        if (_isDisposed || ActiveDocument is null) return;
+        if (_isDisposed || ActiveDocument is null)
+            return;
 
         CancellationToken token;
+        var previewVersion = Interlocked.Increment(ref _previewVersion);
+
         lock (_ctsLock)
         {
-            if (_isDisposed) return;
+            if (_isDisposed)
+                return;
+
             _previewCts?.Cancel();
             _previewCts?.Dispose();
             _previewCts = new CancellationTokenSource();
@@ -225,38 +273,63 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
             {
                 if (!immediate)
                 {
-                    await Task.Delay(_previewDebounceDelay, token).ConfigureAwait(false);
+                    await Task.Delay(_previewDebounceDelay, token)
+                        .ConfigureAwait(false);
                 }
 
-                if (token.IsCancellationRequested) return;
+                token.ThrowIfCancellationRequested();
 
                 var result = renderer.Render(doc);
 
-                if (!token.IsCancellationRequested)
+                token.ThrowIfCancellationRequested();
+
+                RunOnUIThread(() =>
                 {
-                    RunOnUIThread(() =>
+                    if (token.IsCancellationRequested ||
+                        previewVersion != Volatile.Read(ref _previewVersion) ||
+                        _isDisposed)
                     {
-                        if (!token.IsCancellationRequested)
-                        {
-                            HtmlPreview = result.Html;
-                        }
-                    });
-                }
+                        return;
+                    }
+
+                    HtmlPreview = result.Html;
+                });
             }
-            catch (OperationCanceledException) { }
+            catch (OperationCanceledException)
+            {
+            }
             catch (Exception ex)
             {
-                RunOnUIThread(() => ErrorMessage = $"Render error: {ex.Message}");
+                RunOnUIThread(() =>
+                {
+                    if (!_isDisposed &&
+                        previewVersion == Volatile.Read(ref _previewVersion))
+                    {
+                        ErrorMessage = $"Render error: {ex.Message}";
+                    }
+                });
             }
         }, token);
     }
 
     private void RunOnUIThread(Action action)
     {
+        ArgumentNullException.ThrowIfNull(action);
+
         if (_uiDispatcherInvoker is not null)
+        {
             _uiDispatcherInvoker(action);
-        else
+            return;
+        }
+
+        if (Dispatcher.UIThread.CheckAccess())
+        {
             action();
+        }
+        else
+        {
+            Dispatcher.UIThread.Post(action);
+        }
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
@@ -269,7 +342,34 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(propertyName);
         return true;
     }
+    private static SourceRange CreateFullDocumentRange(string source)
+    {
+        var line = 1;
+        var column = 1;
 
+        foreach (var character in source)
+        {
+            if (character == '\n')
+            {
+                line++;
+                column = 1;
+            }
+            else
+            {
+                column++;
+            }
+        }
+
+        return new SourceRange
+        {
+            StartOffset = 0,
+            Length = source.Length,
+            StartLine = 1,
+            StartColumn = 1,
+            EndLine = line,
+            EndColumn = column
+        };
+    }
     public void Dispose()
     {
         lock (_ctsLock)
