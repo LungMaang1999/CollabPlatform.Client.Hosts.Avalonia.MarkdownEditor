@@ -203,13 +203,24 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         EnsureEditableDocument();
 
         var document = ActiveDocument!.Document;
-
-        var cmd = new ChangeTextCommand(document,_editApplier,_sourceEditor,range,replacement ?? string.Empty);
+        var cmd = new ChangeTextCommand(document, _editApplier, _sourceEditor, range, replacement ?? string.Empty);
 
         _commandManager.Execute(cmd);
-        ScheduleUpdatePreview();
 
+        // 1. 刷新大纲 AST
+        ActiveDocument.RefreshAst();
+
+        // 2. 规范化选择状态（若被选中的节点在编辑中被删除或变更）
+        document.NormalizeEditorState();
+        if (!string.IsNullOrWhiteSpace(document.EditorState.SelectedNodeId))
+        {
+            SelectionService.SelectById(document, document.EditorState.SelectedNodeId);
+        }
+
+        // 3. 调度 HTML 预览刷新与属性通知
+        ScheduleUpdatePreview();
         OnPropertyChanged(nameof(IsModified));
+        OnPropertyChanged(nameof(ActiveDocument));
     }
     public void ApplySourceText(string? source)
     {
@@ -243,13 +254,21 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
     public void Undo()
     {
         if (_commandManager.Undo())
+        {
+            ActiveDocument?.RefreshAst();
             ScheduleUpdatePreview();
+            OnPropertyChanged(nameof(IsModified));
+        }
     }
 
     public void Redo()
     {
         if (_commandManager.Redo())
+        {
+            ActiveDocument?.RefreshAst();
             ScheduleUpdatePreview();
+            OnPropertyChanged(nameof(IsModified));
+        }
     }
 
     public void ScheduleUpdatePreview(bool immediate = false)
