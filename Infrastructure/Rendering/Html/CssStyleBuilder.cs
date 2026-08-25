@@ -30,7 +30,7 @@ public sealed class CssStyleBuilder
 
         Append(css, "border-color", style.BorderColor);
         Append(css, "border-width", style.BorderWidth, "px");
-        if (style.BorderWidth.HasValue && style.BorderWidth > 0 && string.IsNullOrEmpty(style.BorderColor))
+        if ((style.BorderWidth.HasValue && style.BorderWidth > 0) || !string.IsNullOrWhiteSpace(style.BorderColor))
             Append(css, "border-style", "solid");
 
         if (!string.IsNullOrWhiteSpace(style.CustomCss))

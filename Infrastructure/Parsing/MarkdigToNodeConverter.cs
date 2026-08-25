@@ -219,9 +219,7 @@ public sealed class MarkdigToNodeConverter
 
             case FencedCodeBlock codeBlock:
                 {
-                    var codeText = string.Join(
-                        "\n",
-                        codeBlock.Lines.Lines.Select(line => line.ToString()));
+                    var codeText = codeBlock.Lines.ToString();
 
                     var codeNode = _nodeFactory.Create(
                         NodeType.CodeBlock,
@@ -239,9 +237,7 @@ public sealed class MarkdigToNodeConverter
 
             case YamlFrontMatterBlock yamlBlock:
                 {
-                    var yamlText = string.Join(
-                        "\n",
-                        yamlBlock.Lines.Lines.Select(line => line.ToString()));
+                    var yamlText = yamlBlock.Lines.ToString();
 
                     return _nodeFactory.Create(
                         NodeType.YamlFrontMatter,
@@ -252,9 +248,7 @@ public sealed class MarkdigToNodeConverter
 
             case HtmlBlock htmlBlock:
                 {
-                    var htmlText = string.Join(
-                        "\n",
-                        htmlBlock.Lines.Lines.Select(line => line.ToString()));
+                    var htmlText = htmlBlock.Lines.ToString();
 
                     return _nodeFactory.Create(
                         NodeType.HtmlBlock,

@@ -290,7 +290,14 @@ public sealed class HtmlRenderer : IDocumentRenderer
 
         html.Append("<pre");
         AppendNodeAttributes(node, html);
-        html.Append("><code>");
+        html.Append("><code");
+
+        if (node.Attributes.TryGetValue("language", out var lang) && !string.IsNullOrWhiteSpace(lang))
+        {
+            html.Append(" class=\"language-").Append(WebUtility.HtmlEncode(lang.Trim())).Append('"');
+        }
+
+        html.Append('>');
         html.Append(WebUtility.HtmlEncode(codeText));
         html.Append("</code></pre>");
     }

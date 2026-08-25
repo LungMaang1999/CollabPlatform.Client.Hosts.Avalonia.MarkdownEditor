@@ -1,14 +1,15 @@
-﻿using System.ComponentModel;
-using System.Runtime.CompilerServices;
-using Avalonia.Threading;
+﻿using Avalonia.Threading;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Documents;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Editing;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Rendering;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Threading;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Editing.Commands;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Documents;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Styling;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Presentation.Avalonia.Services;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Presentation.Avalonia.ViewModels;
 
@@ -18,7 +19,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
     private readonly IDocumentRendererFactory _rendererFactory;
     private readonly IMarkdownSourceEditor _sourceEditor;
     private readonly IMarkdownEditApplier _editApplier;
-    private readonly Action<Action>? _uiDispatcherInvoker;
+    private readonly IUiThreadDispatcher? _uiDispatcher;
     private readonly CommandManager _commandManager = new();
 
     private DocumentViewModel? _activeDocument;
@@ -29,7 +30,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
 
     private readonly object _ctsLock = new();
     private CancellationTokenSource? _previewCts;
-    private readonly TimeSpan _previewDebounceDelay = TimeSpan.FromMilliseconds(150);
+    private readonly TimeSpan _previewDebounceDelay = TimeSpan.FromMilliseconds(800);
     private bool _isDisposed;
     private long _previewVersion;
 
@@ -82,13 +83,13 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         IDocumentRendererFactory rendererFactory,
         IMarkdownSourceEditor sourceEditor,
         IMarkdownEditApplier editApplier,
-        Action<Action>? uiDispatcherInvoker = null)
+        IUiThreadDispatcher? uiDispatcher = null)
     {
         _documentService = documentService ?? throw new ArgumentNullException(nameof(documentService));
         _rendererFactory = rendererFactory ?? throw new ArgumentNullException(nameof(rendererFactory));
         _sourceEditor = sourceEditor ?? throw new ArgumentNullException(nameof(sourceEditor));
         _editApplier = editApplier ?? throw new ArgumentNullException(nameof(editApplier));
-        _uiDispatcherInvoker = uiDispatcherInvoker;
+        _uiDispatcher = uiDispatcher;
 
         _commandManager.CommandStateChanged += OnCommandStateChanged;
         _documentService.CurrentDocumentChanged += OnCurrentDocumentChanged;
@@ -151,15 +152,8 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
                 ErrorMessage = null;
             });
 
-            var doc = await _documentService.OpenAsync(filePath, ct).ConfigureAwait(false);
+            await _documentService.OpenAsync(filePath, ct).ConfigureAwait(false);
             _commandManager.Clear();
-
-            RunOnUIThread(() =>
-            {
-                ActiveDocument = new DocumentViewModel(doc);
-                _activeRenderer = _rendererFactory.Create(doc);
-                ScheduleUpdatePreview(immediate: true);
-            });
         }
         catch (Exception ex)
         {
@@ -203,13 +197,24 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         EnsureEditableDocument();
 
         var document = ActiveDocument!.Document;
-
-        var cmd = new ChangeTextCommand(document,_editApplier,_sourceEditor,range,replacement ?? string.Empty);
+        var cmd = new ChangeTextCommand(document, _editApplier, _sourceEditor, range, replacement ?? string.Empty);
 
         _commandManager.Execute(cmd);
-        ScheduleUpdatePreview();
 
+        // 1. 刷新大纲 AST
+        ActiveDocument.RefreshAst();
+
+        // 2. 规范化选择状态（若被选中的节点在编辑中被删除或变更）
+        document.NormalizeEditorState();
+        if (!string.IsNullOrWhiteSpace(document.EditorState.SelectedNodeId))
+        {
+            SelectionService.SelectById(document, document.EditorState.SelectedNodeId);
+        }
+
+        // 3. 调度 HTML 预览刷新与属性通知
+        ScheduleUpdatePreview();
         OnPropertyChanged(nameof(IsModified));
+        OnPropertyChanged(nameof(ActiveDocument));
     }
     public void ApplySourceText(string? source)
     {
@@ -243,13 +248,21 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
     public void Undo()
     {
         if (_commandManager.Undo())
+        {
+            ActiveDocument?.RefreshAst();
             ScheduleUpdatePreview();
+            OnPropertyChanged(nameof(IsModified));
+        }
     }
 
     public void Redo()
     {
         if (_commandManager.Redo())
+        {
+            ActiveDocument?.RefreshAst();
             ScheduleUpdatePreview();
+            OnPropertyChanged(nameof(IsModified));
+        }
     }
 
     public void ScheduleUpdatePreview(bool immediate = false)
@@ -323,9 +336,12 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
     {
         ArgumentNullException.ThrowIfNull(action);
 
-        if (_uiDispatcherInvoker is not null)
+        if (_uiDispatcher is not null)
         {
-            _uiDispatcherInvoker(action);
+            if (_uiDispatcher.CheckAccess())
+                action();
+            else
+                _uiDispatcher.Post(action);
             return;
         }
 
