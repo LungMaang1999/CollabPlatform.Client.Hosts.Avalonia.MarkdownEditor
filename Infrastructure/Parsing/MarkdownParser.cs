@@ -34,8 +34,8 @@ public sealed class MarkdownParser : IMarkdownParser
         if (_options.EnableTaskLists) pipelineBuilder.UseTaskLists();
         if (_options.EnableFootnotes) pipelineBuilder.UseFootnotes();
         if (_options.EnableYamlFrontMatter) pipelineBuilder.UseYamlFrontMatter();
-
-        pipelineBuilder.UseEmphasisExtras();
+        if (_options.EnableEmphasisExtras) pipelineBuilder.UseEmphasisExtras();
+        if (_options.EnableAutoLinks) pipelineBuilder.UseAutoLinks();
 
         _pipeline = pipelineBuilder.Build();
     }
@@ -78,7 +78,40 @@ public sealed class MarkdownParser : IMarkdownParser
         string source,
         ICollection<DiagnosticMessage> diagnostics)
     {
-        var markdigDoc = Markdown.Parse(source, _pipeline);
-        return _converter.ConvertBlocks(markdigDoc, diagnostics);
+        Markdig.Syntax.MarkdownDocument markdigDoc;
+
+        try
+        {
+            markdigDoc = Markdown.Parse(source, _pipeline);
+        }
+        catch (Exception ex)
+        {
+            diagnostics.Add(new DiagnosticMessage
+            {
+                Severity = DiagnosticSeverity.Error,
+                Code = "MARKDOWN_PARSE_FAILED",
+                Message = ex.Message,
+                Range = SourceRange.Empty()
+            });
+
+            return Array.Empty<MarkdownNode>();
+        }
+
+        try
+        {
+            return _converter.ConvertBlocks(markdigDoc, diagnostics);
+        }
+        catch (Exception ex)
+        {
+            diagnostics.Add(new DiagnosticMessage
+            {
+                Severity = DiagnosticSeverity.Error,
+                Code = "MARKDOWN_CONVERSION_FAILED",
+                Message = ex.Message,
+                Range = SourceRange.Empty()
+            });
+
+            return Array.Empty<MarkdownNode>();
+        }
     }
 }

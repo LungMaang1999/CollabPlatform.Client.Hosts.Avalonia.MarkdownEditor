@@ -141,13 +141,16 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
             }
         });
     }
-
     public async Task OpenDocumentAsync(string filePath, CancellationToken ct = default)
     {
         try
         {
-            IsBusy = true;
-            ErrorMessage = null;
+            RunOnUIThread(() =>
+            {
+                IsBusy = true;
+                ErrorMessage = null;
+            });
+
             var doc = await _documentService.OpenAsync(filePath, ct).ConfigureAwait(false);
             _commandManager.Clear();
 
@@ -160,12 +163,12 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (Exception ex)
         {
-            ErrorMessage = $"Failed to open file: {ex.Message}";
+            RunOnUIThread(() => ErrorMessage = $"Failed to open file: {ex.Message}");
             throw;
         }
         finally
         {
-            IsBusy = false;
+            RunOnUIThread(() => IsBusy = false);
         }
     }
 
@@ -173,19 +176,23 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
     {
         try
         {
-            IsBusy = true;
-            ErrorMessage = null;
+            RunOnUIThread(() =>
+            {
+                IsBusy = true;
+                ErrorMessage = null;
+            });
+
             await _documentService.SaveAsync(ct).ConfigureAwait(false);
             RunOnUIThread(() => OnPropertyChanged(nameof(IsModified)));
         }
         catch (Exception ex)
         {
-            ErrorMessage = $"Failed to save document: {ex.Message}";
+            RunOnUIThread(() => ErrorMessage = $"Failed to save document: {ex.Message}");
             throw;
         }
         finally
         {
-            IsBusy = false;
+            RunOnUIThread(() => IsBusy = false);
         }
     }
 

@@ -22,39 +22,19 @@ public sealed class MarkdownSourceEditor : IMarkdownSourceEditor
         while (trimHeader < slice.Length && slice[trimHeader] == '#') trimHeader++;
         while (trimHeader < slice.Length && slice[trimHeader] == ' ') trimHeader++;
 
-        var content = slice[trimHeader..];
+        int contentOffset = start + trimHeader;
+        int contentLength = length - trimHeader;
 
-        int newTotalLength = newLevel + 1 + content.Length;
-        string replacement = string.Create(newTotalLength, (newLevel, content.ToString()), (span, state) =>
+        int newTotalLength = newLevel + 1 + contentLength;
+        string replacement = string.Create(newTotalLength, (source, contentOffset, contentLength, newLevel), (span, state) =>
         {
-            span[..state.newLevel].Fill('#');
-            span[state.newLevel] = ' ';
-            state.Item2.AsSpan().CopyTo(span[(state.newLevel + 1)..]);
+            var (src, cOff, cLen, lvl) = state;
+            span[..lvl].Fill('#');
+            span[lvl] = ' ';
+            src.AsSpan(cOff, cLen).CopyTo(span[(lvl + 1)..]);
         });
 
         return ReplaceRange(source, headingRange, replacement);
-    }
-
-    public string DeleteRange(string source, SourceRange range) =>
-        ReplaceRange(source, range, string.Empty);
-
-    public string ReplaceRange(string source, SourceRange range, string replacement)
-    {
-        ArgumentNullException.ThrowIfNull(source);
-        ArgumentNullException.ThrowIfNull(range);
-        replacement ??= string.Empty;
-
-        int start = Math.Clamp(range.StartOffset, 0, source.Length);
-        int length = Math.Clamp(range.Length, 0, source.Length - start);
-
-        int newCapacity = source.Length - length + replacement.Length;
-        return string.Create(newCapacity, (source, start, length, replacement), (span, state) =>
-        {
-            var (src, s, len, rep) = state;
-            src.AsSpan(0, s).CopyTo(span);
-            rep.AsSpan().CopyTo(span[s..]);
-            src.AsSpan(s + len).CopyTo(span[(s + rep.Length)..]);
-        });
     }
 
     public string MoveBlock(string source, SourceRange range, int targetOffset)
@@ -67,6 +47,8 @@ public sealed class MarkdownSourceEditor : IMarkdownSourceEditor
         int blockLength = Math.Clamp(range.Length, 0, source.Length - blockStart);
 
         if (blockLength == 0) return source;
+        // 如果目标偏移量在块自身范围之内，直接返回原字符串（无位移）
+        if (targetOffset >= blockStart && targetOffset <= blockStart + blockLength) return source;
 
         int finalTarget = targetOffset > blockStart ? targetOffset - blockLength : targetOffset;
 
@@ -91,6 +73,28 @@ public sealed class MarkdownSourceEditor : IMarkdownSourceEditor
                 blockSpan.CopyTo(span[tOffset..]);
                 src.AsSpan(tOffset + bLen).CopyTo(span[(tOffset + bLen)..]);
             }
+        });
+    }
+
+    public string DeleteRange(string source, SourceRange range) =>
+        ReplaceRange(source, range, string.Empty);
+
+    public string ReplaceRange(string source, SourceRange range, string replacement)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(range);
+        replacement ??= string.Empty;
+
+        int start = Math.Clamp(range.StartOffset, 0, source.Length);
+        int length = Math.Clamp(range.Length, 0, source.Length - start);
+
+        int newCapacity = source.Length - length + replacement.Length;
+        return string.Create(newCapacity, (source, start, length, replacement), (span, state) =>
+        {
+            var (src, s, len, rep) = state;
+            src.AsSpan(0, s).CopyTo(span);
+            rep.AsSpan().CopyTo(span[s..]);
+            src.AsSpan(s + len).CopyTo(span[(s + rep.Length)..]);
         });
     }
 }

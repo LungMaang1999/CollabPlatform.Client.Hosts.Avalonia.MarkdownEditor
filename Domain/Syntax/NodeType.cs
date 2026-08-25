@@ -12,10 +12,12 @@ public enum NodeType
     Heading,
     Paragraph,
     Text,
+    LineBreak,
 
     UnorderedList,
     OrderedList,
     ListItem,
+    TaskListItem,
 
     Quote,
     CodeBlock,
@@ -31,6 +33,11 @@ public enum NodeType
     Emphasis,
     Delete,
     InlineCode,
+
+    FootnoteLink,
+    FootnoteGroup,
+    Footnote,
+    YamlFrontMatter,
 
     HtmlBlock,
     HtmlInline,

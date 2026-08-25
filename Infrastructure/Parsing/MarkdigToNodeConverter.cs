@@ -1,11 +1,11 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Diagnostics;
+﻿using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Diagnostics;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax.Factories;
+using Markdig.Extensions.Footnotes;
 using Markdig.Extensions.Tables;
 using Markdig.Extensions.TaskLists;
+using Markdig.Extensions.Yaml;
+using Markdig.Helpers;
 using Markdig.Syntax;
 using Markdig.Syntax.Inlines;
 
@@ -23,16 +23,45 @@ public sealed class MarkdigToNodeConverter
         _nodeFactory = nodeFactory ?? new NodeFactory();
     }
 
-    public List<MarkdownNode> ConvertBlocks(ContainerBlock rootContainer, ICollection<DiagnosticMessage> diagnostics)
+    public List<MarkdownNode> ConvertBlocks(
+        ContainerBlock rootContainer,
+        ICollection<DiagnosticMessage> diagnostics)
     {
+        ArgumentNullException.ThrowIfNull(rootContainer);
+        ArgumentNullException.ThrowIfNull(diagnostics);
+
         var resultNodes = new List<MarkdownNode>();
 
         foreach (var block in rootContainer)
         {
-            var node = ConvertBlock(block, diagnostics);
-            if (node is not null)
+            try
             {
-                resultNodes.Add(node);
+                #if DEBUG
+                // 仅在调试构建时保留详细 block 诊断，发布模式直接转换
+                diagnostics.Add(new DiagnosticMessage
+                {
+                    Severity = DiagnosticSeverity.Info,
+                    Code = "DEBUG_BLOCK_TYPE",
+                    Message = $"Block type: {block.GetType().FullName}; Span: {block.Span}",
+                    Range = ExtractSourceRange(block)
+                });
+                #endif
+                var node = ConvertBlock(block, diagnostics);
+                if (node is not null)
+                {
+                    resultNodes.Add(node);
+                }
+            }
+            catch (Exception ex)
+            {
+                diagnostics.Add(new DiagnosticMessage
+                {
+                    Severity = DiagnosticSeverity.Warning,
+                    Code = "BLOCK_CONVERSION_FAILED",
+                    Message =
+                        $"Failed to convert block {block.GetType().FullName}: {ex.Message}",
+                    Range = ExtractSourceRange(block)
+                });
             }
         }
 
@@ -57,22 +86,42 @@ public sealed class MarkdigToNodeConverter
                 return paragraphNode;
 
             case ListBlock listBlock:
-                var listType = listBlock.IsOrdered ? NodeType.OrderedList : NodeType.UnorderedList;
-                var listNode = _nodeFactory.Create(listType, NodeCategory.Container, range: range);
+                var listType = listBlock.IsOrdered
+                     ? NodeType.OrderedList
+                     : NodeType.UnorderedList;
+
+                var listNode = _nodeFactory.Create(
+                    listType,
+                    NodeCategory.Container,
+                    range: range);
 
                 foreach (var item in listBlock)
                 {
-                    if (item is ListItemBlock listItem)
+                    if (item is not ListItemBlock listItem)
                     {
-                        var listItemNode = _nodeFactory.Create(NodeType.ListItem, NodeCategory.Container, range: ExtractSourceRange(listItem));
-                        var itemChildren = ConvertBlocks(listItem, diagnostics);
-                        foreach (var child in itemChildren)
-                        {
-                            listItemNode.AddChild(child);
-                        }
-                        listNode.AddChild(listItemNode);
+                        continue;
                     }
+
+                    var isTaskItem = TryGetTaskState(listItem, out var isChecked);
+                    var itemNode = _nodeFactory.Create(
+                        isTaskItem ? NodeType.TaskListItem : NodeType.ListItem,
+                        NodeCategory.Container,
+                        range: ExtractSourceRange(listItem));
+
+                    if (isTaskItem)
+                    {
+                        itemNode.Attributes["checked"] = isChecked ? "true" : "false";
+                    }
+
+                    var itemChildren = ConvertBlocks(listItem, diagnostics);
+                    foreach (var child in itemChildren)
+                    {
+                        itemNode.AddChild(child);
+                    }
+
+                    listNode.AddChild(itemNode);
                 }
+
                 return listNode;
 
             case QuoteBlock quoteBlock:
@@ -129,103 +178,266 @@ public sealed class MarkdigToNodeConverter
                 }
 
                 return tableNode;
-            case FencedCodeBlock codeBlock:
-                var codeText = string.Join("\n", codeBlock.Lines.Lines.Select(l => l.ToString()));
-                var codeNode = _nodeFactory.Create(NodeType.CodeBlock, NodeCategory.Block, text: codeText, range: range);
-                if (!string.IsNullOrWhiteSpace(codeBlock.Info))
+            case FootnoteGroup footnoteGroup:
                 {
-                    codeNode.Attributes["language"] = codeBlock.Info;
+                    var groupNode = _nodeFactory.Create(
+                        NodeType.FootnoteGroup,
+                        NodeCategory.Container,
+                        range: range);
+
+                    // Markdig 的脚注扩展内部脚注列表顺序就是最终显示给用户的顺序编号。
+                    // 直接用枚举位置分配 1..N 的序号，和脚注引用端保持一致。
+                    var footnoteIndex = 1;
+                    foreach (var blockObj in footnoteGroup)
+                    {
+                        if (blockObj is not Footnote footnoteBlock)
+                        {
+                            continue;
+                        }
+
+                        var footnoteNode = _nodeFactory.Create(
+                            NodeType.Footnote,
+                            NodeCategory.Container,
+                            range: ExtractSourceRange(footnoteBlock));
+
+                        footnoteNode.Attributes["index"] = footnoteIndex.ToString();
+                        footnoteNode.Attributes["id"] = $"fn-{footnoteIndex}";
+                        footnoteNode.Text = footnoteIndex.ToString();
+
+                        var children = ConvertBlocks(footnoteBlock, diagnostics);
+                        foreach (var child in children)
+                        {
+                            footnoteNode.AddChild(child);
+                        }
+
+                        groupNode.AddChild(footnoteNode);
+                        footnoteIndex++;
+                    }
+
+                    return groupNode;
                 }
-                return codeNode;
+
+            case FencedCodeBlock codeBlock:
+                {
+                    var codeText = string.Join(
+                        "\n",
+                        codeBlock.Lines.Lines.Select(line => line.ToString()));
+
+                    var codeNode = _nodeFactory.Create(
+                        NodeType.CodeBlock,
+                        NodeCategory.Block,
+                        text: codeText,
+                        range: range);
+
+                    if (!string.IsNullOrWhiteSpace(codeBlock.Info))
+                    {
+                        codeNode.Attributes["language"] = codeBlock.Info.Trim();
+                    }
+
+                    return codeNode;
+                }
+
+            case YamlFrontMatterBlock yamlBlock:
+                {
+                    var yamlText = string.Join(
+                        "\n",
+                        yamlBlock.Lines.Lines.Select(line => line.ToString()));
+
+                    return _nodeFactory.Create(
+                        NodeType.YamlFrontMatter,
+                        NodeCategory.Block,
+                        text: yamlText,
+                        range: range);
+                }
+
+            case HtmlBlock htmlBlock:
+                {
+                    var htmlText = string.Join(
+                        "\n",
+                        htmlBlock.Lines.Lines.Select(line => line.ToString()));
+
+                    return _nodeFactory.Create(
+                        NodeType.HtmlBlock,
+                        NodeCategory.Block,
+                        text: htmlText,
+                        range: range);
+                }
 
             case ThematicBreakBlock:
                 return _nodeFactory.Create(NodeType.ThematicBreak, NodeCategory.Leaf, range: range);
-
-            case HtmlBlock htmlBlock:
-                var htmlText = string.Join("\n", htmlBlock.Lines.Lines.Select(l => l.ToString()));
-                return _nodeFactory.Create(NodeType.HtmlBlock, NodeCategory.Block, text: htmlText, range: range);
 
             default:
                 diagnostics.Add(new DiagnosticMessage
                 {
                     Severity = DiagnosticSeverity.Warning,
                     Code = "UNSUPPORTED_BLOCK_TYPE",
-                    Message = $"Unsupported block element: {block.GetType().Name}",
+                    Message =
+                        $"Unsupported block element: {block.GetType().FullName}",
                     Range = range
                 });
+
                 return null;
         }
     }
 
-    private void ProcessInlines(ContainerInline? container, MarkdownNode parentNode, ICollection<DiagnosticMessage> diagnostics)
+    private void ProcessInlines(
+    ContainerInline? container,
+    MarkdownNode parentNode,
+    ICollection<DiagnosticMessage> diagnostics)
     {
-        if (container is null) return;
+        if (container is null)
+        {
+            return;
+        }
 
         foreach (var inline in container)
         {
             var range = ExtractSourceRange(inline);
+
             switch (inline)
             {
                 case LiteralInline literal:
-                    parentNode.AddChild(_nodeFactory.Create(NodeType.Text, NodeCategory.Inline, text: literal.Content.ToString(), range: range));
+                    parentNode.AddChild(
+                        _nodeFactory.Create(
+                            NodeType.Text,
+                            NodeCategory.Inline,
+                            text: literal.Content.ToString(),
+                            range: range));
                     break;
 
-                case TaskList taskList:
-                    var taskText = taskList.Checked ? "[x] " : "[ ] ";
-                    parentNode.AddChild(_nodeFactory.Create(NodeType.Text, NodeCategory.Inline, text: taskText, range: range));
+                case TaskList:
+                    // 任务状态已经在 ListItemBlock 层级通过 TryGetTaskState 读取。
+                    // 避免在段落内再次生成独立 TaskListItem，造成重复 checkbox 或者文本丢失。
                     break;
-
                 case EmphasisInline emphasis:
-                    var inlineType = emphasis.DelimiterChar switch
                     {
-                        '~' => NodeType.Delete,
-                        '*' or '_' when emphasis.DelimiterCount >= 2 => NodeType.Strong,
-                        '*' or '_' => NodeType.Emphasis,
-                        _ => NodeType.Emphasis
-                    };
+                        var inlineType = emphasis.DelimiterChar switch
+                        {
+                            '~' => NodeType.Delete,
+                            '*' or '_' when emphasis.DelimiterCount >= 2 => NodeType.Strong,
+                            '*' or '_' => NodeType.Emphasis,
+                            _ => NodeType.Emphasis
+                        };
 
-                    var inlineNode = _nodeFactory.Create(
-                        inlineType,
-                        NodeCategory.Inline,
-                        range: range);
+                        var inlineNode = _nodeFactory.Create(
+                            inlineType,
+                            NodeCategory.Inline,
+                            range: range);
 
-                    // 必须递归处理内部内容，否则 <del>、<strong> 或 <em> 只有标签而没有文本。
-                    ProcessInlines(emphasis, inlineNode, diagnostics);
-                    parentNode.AddChild(inlineNode);
-                    break;
+                        ProcessInlines(emphasis, inlineNode, diagnostics);
+                        parentNode.AddChild(inlineNode);
+                        break;
+                    }
 
                 case CodeInline code:
-                    parentNode.AddChild(_nodeFactory.Create(NodeType.InlineCode, NodeCategory.Inline, text: code.Content, range: range));
+                    parentNode.AddChild(
+                        _nodeFactory.Create(
+                            NodeType.InlineCode,
+                            NodeCategory.Inline,
+                            text: code.Content,
+                            range: range));
+                    break;
+                case AutolinkInline autoLink:
+                    AddAutoLinkNode(
+                        autoLink.Url ?? string.Empty,
+                        range,
+                        parentNode);
                     break;
 
                 case LinkInline link:
-                    var linkType = link.IsImage ? NodeType.Image : NodeType.Link;
-                    var linkNode = _nodeFactory.Create(linkType, NodeCategory.Inline, range: range);
-
-                    var url = link.Url ?? string.Empty;
-                    if (link.IsImage)
                     {
-                        linkNode.Attributes["src"] = url;
-                        linkNode.Attributes["url"] = url;
+                        var url = (link.Url ?? string.Empty).Trim();
+
+                        if (link.IsAutoLink)
+                        {
+                            AddAutoLinkNode(
+                                url,
+                                range,
+                                parentNode);
+                            break;
+                        }
+
+                        var linkType = link.IsImage
+                            ? NodeType.Image
+                            : NodeType.Link;
+
+                        var linkNode = _nodeFactory.Create(
+                            linkType,
+                            NodeCategory.Inline,
+                            range: range);
+
+                        if (link.IsImage)
+                        {
+                            linkNode.Attributes["src"] = url;
+                            linkNode.Attributes["url"] = url;
+
+                            ProcessInlines(
+                                link,
+                                linkNode,
+                                diagnostics);
+                        }
+                        else
+                        {
+                            linkNode.Attributes["href"] = url;
+                            linkNode.Attributes["url"] = url;
+
+                            ProcessInlines(
+                                link,
+                                linkNode,
+                                diagnostics);
+
+                            linkNode.Text = GetInlineText(linkNode);
+
+                            if (string.IsNullOrEmpty(linkNode.Text))
+                            {
+                                linkNode.Text = url;
+                            }
+                        }
+
+                        parentNode.AddChild(linkNode);
+                        break;
                     }
-                    else
+                case LineBreakInline lineBreak:
+                    parentNode.AddChild(
+                        _nodeFactory.Create(
+                            NodeType.LineBreak,
+                            NodeCategory.Inline,
+                            range: range));
+                    break;
+                case FootnoteLink footnoteLink:
                     {
-                        linkNode.Attributes["href"] = url;
-                        linkNode.Attributes["url"] = url;
+                        var linkNode = _nodeFactory.Create(
+                            NodeType.FootnoteLink,
+                            NodeCategory.Inline,
+                            range: range);
+
+                        // Markdig 中 FootnoteLink.Index 就是脚注在文档中出现的顺序序号，是 1-based 的 int。
+                        // Markdig 脚注扩展内部定义脚注时，会把对应的 FootnoteLink.Index 设好，和 FootnoteGroup 顺序严格对应。
+                        var indexValue = footnoteLink.Index;
+                        var indexText = indexValue.ToString();
+
+                        linkNode.Attributes["id"] = $"fnref-{indexText}";
+                        linkNode.Attributes["href"] = $"#fn-{indexText}";
+                        linkNode.Attributes["index"] = indexText;
+                        linkNode.Text = indexText;
+
+                        parentNode.AddChild(linkNode);
+                        break;
                     }
-
-                    ProcessInlines(link, linkNode, diagnostics);
-                    parentNode.AddChild(linkNode);
-                    break;
-
-                case LineBreakInline:
-                    parentNode.AddChild(_nodeFactory.Create(NodeType.Text, NodeCategory.Inline, text: "\n", range: range));
-                    break;
-
                 default:
                     if (inline is ContainerInline childContainer)
                     {
                         ProcessInlines(childContainer, parentNode, diagnostics);
+                    }
+                    else
+                    {
+                        diagnostics.Add(new DiagnosticMessage
+                        {
+                            Severity = DiagnosticSeverity.Warning,
+                            Code = "UNSUPPORTED_INLINE_TYPE",
+                            Message = $"Unsupported inline element: {inline.GetType().Name}",
+                            Range = range
+                        });
                     }
                     break;
             }
@@ -253,5 +465,84 @@ public sealed class MarkdigToNodeConverter
             EndLine = startLine,
             EndColumn = startColumn + length
         };
+    }
+    private static bool TryGetTaskState(
+    ListItemBlock listItem,
+    out bool isChecked)
+    {
+        isChecked = false;
+
+        foreach (var block in listItem)
+        {
+            if (block is not ParagraphBlock paragraph || paragraph.Inline is null)
+            {
+                continue;
+            }
+
+            foreach (var inline in paragraph.Inline)
+            {
+                if (inline is TaskList taskList)
+                {
+                    isChecked = taskList.Checked;
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+    private static bool LooksLikeEmail(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        var at = value.LastIndexOf('@');
+        return at > 0
+            && at < value.Length - 1
+            && value.IndexOf(' ') < 0
+            && value.IndexOf('/') < 0
+            && value[(at + 1)..].Contains('.');
+    }
+    private void AddAutoLinkNode(
+    string rawUrl,
+    SourceRange range,
+    MarkdownNode parentNode)
+    {
+        var normalizedUrl = (rawUrl ?? string.Empty).Trim();
+        var hrefValue = normalizedUrl;
+        var displayValue = normalizedUrl;
+
+        if (normalizedUrl.StartsWith(
+                "mailto:",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            displayValue = normalizedUrl["mailto:".Length..];
+        }
+        else if (LooksLikeEmail(normalizedUrl))
+        {
+            hrefValue = $"mailto:{normalizedUrl}";
+            displayValue = normalizedUrl;
+        }
+
+        var autoLinkNode = _nodeFactory.Create(
+            NodeType.Link,
+            NodeCategory.Inline,
+            range: range);
+
+        autoLinkNode.Attributes["href"] = hrefValue;
+        autoLinkNode.Attributes["url"] = hrefValue;
+        autoLinkNode.Text = displayValue;
+
+        parentNode.AddChild(autoLinkNode);
+    }
+    private static string GetInlineText(MarkdownNode node)
+    {
+        if (node.Type == NodeType.Text)
+            return node.Text;
+
+        if (!string.IsNullOrEmpty(node.Text))
+            return node.Text;
+
+        return string.Concat(node.Children.Select(GetInlineText));
     }
 }

@@ -69,6 +69,79 @@ public sealed class HtmlRenderer : IDocumentRenderer
                 case NodeType.ListItem:
                     RenderBlock(node, "li", html, diagnostics);
                     break;
+                case NodeType.TaskListItem:
+                    {
+                        var isChecked =
+                            node.Attributes.TryGetValue("checked", out var checkedValue)
+                            && string.Equals(
+                                checkedValue,
+                                "true",
+                                StringComparison.OrdinalIgnoreCase);
+
+                        html.Append("<li class=\"task-list-item\">");
+                        html.Append("<input type=\"checkbox\" disabled");
+
+                        if (isChecked)
+                        {
+                            html.Append(" checked");
+                        }
+
+                        html.Append("> ");
+                        RenderListItemChildren(node, html, diagnostics);
+                        html.Append("</li>");
+                        break;
+                    }
+                case NodeType.FootnoteGroup:
+                    html.Append("<section class=\"footnotes\"><ol>");
+                    RenderChildren(node, html, diagnostics);
+                    html.Append("</ol></section>");
+                    break;
+
+                case NodeType.Footnote:
+                    {
+                        var index = node.Attributes.TryGetValue("index", out var value)
+                            ? value
+                            : node.Text;
+
+                        html.Append("<li id=\"fn-");
+                        AppendEncoded(html, index);
+                        html.Append("\">");
+
+                        RenderFootnoteChildren(node, html, diagnostics);
+
+                        // data-footnote-target 由统一的脚注脚本读取。
+                        // href 保留，确保 JavaScript 不可用时仍能正常跳转。
+                        html.Append(" <a class=\"footnote-backref\" href=\"#fnref-");
+                        AppendEncoded(html, index);
+                        html.Append("\" data-footnote-target=\"fnref-");
+                        AppendEncoded(html, index);
+                        html.Append("\" aria-label=\"返回正文中的脚注引用 ");
+                        AppendEncoded(html, index);
+                        html.Append("\">↩</a>");
+
+                        html.Append("</li>");
+                        break;
+                    }
+                case NodeType.FootnoteLink:
+                    {
+                        var index = node.Attributes.TryGetValue("index", out var value)
+                            ? value
+                            : node.Text;
+
+                        html.Append("<sup class=\"footnote-ref\">");
+                        html.Append("<a id=\"fnref-");
+                        AppendEncoded(html, index);
+                        html.Append("\" href=\"#fn-");
+                        AppendEncoded(html, index);
+                        html.Append("\" data-footnote-target=\"fn-");
+                        AppendEncoded(html, index);
+                        html.Append("\" aria-label=\"跳转到脚注 ");
+                        AppendEncoded(html, index);
+                        html.Append("\">");
+                        AppendEncoded(html, index);
+                        html.Append("</a></sup>");
+                        break;
+                    }
                 case NodeType.Quote:
                     RenderBlock(node, "blockquote", html, diagnostics);
                     break;
@@ -91,6 +164,9 @@ public sealed class HtmlRenderer : IDocumentRenderer
                     break;
                 case NodeType.Text:
                     html.Append(WebUtility.HtmlEncode(node.Text));
+                    break;
+                case NodeType.LineBreak:
+                    html.Append("<br />");
                     break;
                 case NodeType.Strong:
                     RenderInline(node, "strong", html, diagnostics);
@@ -219,21 +295,36 @@ public sealed class HtmlRenderer : IDocumentRenderer
         html.Append("</code></pre>");
     }
 
-    private void RenderLink(MarkdownNode node, StringBuilder html, List<DiagnosticMessage> diagnostics)
+    private void RenderLink(
+        MarkdownNode node,
+        StringBuilder html,
+        List<DiagnosticMessage> diagnostics)
     {
         var url = GetAttribute(node, "url") ?? GetAttribute(node, "href");
+
         html.Append("<a");
         AppendNodeAttributes(node, html);
         AppendStyle(node, html);
 
         if (IsSafeUrl(url))
         {
-            html.Append(" href=\"").Append(WebUtility.HtmlEncode(url)).Append('"');
+            html.Append(" href=\"")
+                .Append(WebUtility.HtmlEncode(url!))
+                .Append('"');
         }
 
         html.Append('>');
-        if (node.Children.Count == 0) html.Append(WebUtility.HtmlEncode(node.Text));
-        else RenderChildren(node, html, diagnostics);
+
+        if (!string.IsNullOrEmpty(node.Text))
+        {
+            // 自动链接使用 Text 作为稳定的显示文本。
+            html.Append(WebUtility.HtmlEncode(node.Text));
+        }
+        else
+        {
+            RenderChildren(node, html, diagnostics);
+        }
+
         html.Append("</a>");
     }
 
@@ -286,5 +377,47 @@ public sealed class HtmlRenderer : IDocumentRenderer
         }
 
         return false;
+    }
+    private static void AppendEncoded(StringBuilder html, string value)
+    {
+        html.Append(WebUtility.HtmlEncode(value));
+    }
+    private void RenderListItemChildren(
+    MarkdownNode node,
+    StringBuilder html,
+    List<DiagnosticMessage> diagnostics)
+    {
+        foreach (var child in node.Children)
+        {
+            // 任务列表第一层通常是 Paragraph。
+            // 这里只渲染 Paragraph 的内容，避免输出块级 <p>，从而让文本紧跟 checkbox。
+            if (child.Type == NodeType.Paragraph)
+            {
+                RenderChildren(child, html, diagnostics);
+            }
+            else
+            {
+                RenderNode(child, html, diagnostics);
+            }
+        }
+    }
+    private void RenderFootnoteChildren(
+    MarkdownNode node,
+    StringBuilder html,
+    List<DiagnosticMessage> diagnostics)
+    {
+        foreach (var child in node.Children)
+        {
+            // 脚注的正文通常被转换成 Paragraph。
+            // 去掉外层 <p>，使返回链接可以紧跟在正文末尾。
+            if (child.Type == NodeType.Paragraph)
+            {
+                RenderChildren(child, html, diagnostics);
+            }
+            else
+            {
+                RenderNode(child, html, diagnostics);
+            }
+        }
     }
 }

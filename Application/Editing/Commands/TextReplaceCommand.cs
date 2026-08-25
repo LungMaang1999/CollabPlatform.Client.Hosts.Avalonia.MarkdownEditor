@@ -34,19 +34,20 @@ public sealed class TextReplaceCommand : IEditorCommand, IEditorCommandState
         _newText = newText ?? string.Empty;
         Description = description;
     }
-
     public void Execute()
     {
-        if (_oldText == _newText)
+        if (string.Equals(_oldText, _newText, StringComparison.Ordinal))
         {
             HasChanges = false;
             return;
         }
 
         var fullSource = _document.SourceMarkdown;
-        // 替换指定 Range 的文本为 _newText
-        var prefix = fullSource[.._range.StartOffset];
-        var suffix = fullSource[(_range.StartOffset + _range.Length)..];
+        int start = Math.Clamp(_range.StartOffset, 0, fullSource.Length);
+        int length = Math.Clamp(_range.Length, 0, fullSource.Length - start);
+
+        var prefix = fullSource[..start];
+        var suffix = fullSource[(start + length)..];
         var updatedSource = prefix + _newText + suffix;
 
         _editApplier.Apply(_document, updatedSource);
@@ -56,11 +57,14 @@ public sealed class TextReplaceCommand : IEditorCommand, IEditorCommandState
     public void Undo()
     {
         var fullSource = _document.SourceMarkdown;
-        // 反向还原：将 _newText 所在范围替换回 _oldText
-        var prefix = fullSource[.._range.StartOffset];
-        var suffix = fullSource[(_range.StartOffset + _newText.Length)..];
+        int start = Math.Clamp(_range.StartOffset, 0, fullSource.Length);
+        int newTextLen = Math.Clamp(_newText.Length, 0, fullSource.Length - start);
+
+        var prefix = fullSource[..start];
+        var suffix = fullSource[(start + newTextLen)..];
         var restoredSource = prefix + _oldText + suffix;
 
         _editApplier.Apply(_document, restoredSource);
+        HasChanges = true;
     }
 }
