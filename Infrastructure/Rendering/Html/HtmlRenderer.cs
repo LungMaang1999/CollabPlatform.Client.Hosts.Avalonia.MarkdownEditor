@@ -109,8 +109,6 @@ public sealed class HtmlRenderer : IDocumentRenderer
 
                         RenderFootnoteChildren(node, html, diagnostics);
 
-                        // data-footnote-target 由统一的脚注脚本读取。
-                        // href 保留，确保 JavaScript 不可用时仍能正常跳转。
                         html.Append(" <a class=\"footnote-backref\" href=\"#fnref-");
                         AppendEncoded(html, index);
                         html.Append("\" data-footnote-target=\"fnref-");
@@ -228,7 +226,6 @@ public sealed class HtmlRenderer : IDocumentRenderer
         {
             var child = node.Children[i];
 
-            // 表格单元格中的段落不能输出嵌套的 <p>，但必须继续渲染其子节点。
             if (child.Type == NodeType.Paragraph)
             {
                 RenderChildren(child, html, diagnostics);
@@ -285,7 +282,6 @@ public sealed class HtmlRenderer : IDocumentRenderer
             }
         }
 
-        // 只移除代码块末尾的换行，保留代码内部的换行和缩进。
         var codeText = code.ToString().TrimEnd('\r', '\n');
 
         html.Append("<pre");
@@ -324,7 +320,6 @@ public sealed class HtmlRenderer : IDocumentRenderer
 
         if (!string.IsNullOrEmpty(node.Text))
         {
-            // 自动链接使用 Text 作为稳定的显示文本。
             html.Append(WebUtility.HtmlEncode(node.Text));
         }
         else
@@ -375,7 +370,13 @@ public sealed class HtmlRenderer : IDocumentRenderer
         if (string.IsNullOrWhiteSpace(url)) return false;
 
         var trimmed = url.Trim();
-        if (trimmed.StartsWith("#") || trimmed.StartsWith("/") || trimmed.StartsWith("./") || trimmed.StartsWith("../"))
+
+        // 严密拦截协议相对链接 "//"
+        if (trimmed.StartsWith("//", StringComparison.Ordinal))
+            return false;
+
+        // 允许相对路径与锚点
+        if (trimmed.StartsWith('#') || trimmed.StartsWith('/') || trimmed.StartsWith("./", StringComparison.Ordinal) || trimmed.StartsWith("../", StringComparison.Ordinal))
             return true;
 
         if (Uri.TryCreate(trimmed, UriKind.Absolute, out var uri))
@@ -385,19 +386,19 @@ public sealed class HtmlRenderer : IDocumentRenderer
 
         return false;
     }
+
     private static void AppendEncoded(StringBuilder html, string value)
     {
         html.Append(WebUtility.HtmlEncode(value));
     }
+
     private void RenderListItemChildren(
-    MarkdownNode node,
-    StringBuilder html,
-    List<DiagnosticMessage> diagnostics)
+        MarkdownNode node,
+        StringBuilder html,
+        List<DiagnosticMessage> diagnostics)
     {
         foreach (var child in node.Children)
         {
-            // 任务列表第一层通常是 Paragraph。
-            // 这里只渲染 Paragraph 的内容，避免输出块级 <p>，从而让文本紧跟 checkbox。
             if (child.Type == NodeType.Paragraph)
             {
                 RenderChildren(child, html, diagnostics);
@@ -408,15 +409,14 @@ public sealed class HtmlRenderer : IDocumentRenderer
             }
         }
     }
+
     private void RenderFootnoteChildren(
-    MarkdownNode node,
-    StringBuilder html,
-    List<DiagnosticMessage> diagnostics)
+        MarkdownNode node,
+        StringBuilder html,
+        List<DiagnosticMessage> diagnostics)
     {
         foreach (var child in node.Children)
         {
-            // 脚注的正文通常被转换成 Paragraph。
-            // 去掉外层 <p>，使返回链接可以紧跟在正文末尾。
             if (child.Type == NodeType.Paragraph)
             {
                 RenderChildren(child, html, diagnostics);

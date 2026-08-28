@@ -19,14 +19,9 @@ public sealed class NodeIdentityMatcher : INodeIdentityMatcher
     {
         if (previousNodes.Count == 0 || currentNodes.Count == 0) return;
 
-        if (currentNodes.Count == 1 && IsTransparentSection(currentNodes[0]) && previousNodes.Count == 1 && previousNodes[0].Type == NodeType.Section)
-        {
-            TransferState(previousNodes[0], currentNodes[0]);
-            MatchNodeLists(previousNodes[0].Children, currentNodes[0].Children);
-            return;
-        }
-
-        if (previousNodes.Count == 1 && IsTransparentSection(previousNodes[0]) && currentNodes.Count == 1 && currentNodes[0].Type == NodeType.Section)
+        // 保留单次检查透明 Section，删除重复的冗余分支
+        if ((currentNodes.Count == 1 && IsTransparentSection(currentNodes[0]) && previousNodes.Count == 1 && previousNodes[0].Type == NodeType.Section) ||
+            (previousNodes.Count == 1 && IsTransparentSection(previousNodes[0]) && currentNodes.Count == 1 && currentNodes[0].Type == NodeType.Section))
         {
             TransferState(previousNodes[0], currentNodes[0]);
             MatchNodeLists(previousNodes[0].Children, currentNodes[0].Children);

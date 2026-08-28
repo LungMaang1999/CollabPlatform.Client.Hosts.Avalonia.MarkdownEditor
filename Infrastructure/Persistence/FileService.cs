@@ -10,7 +10,8 @@ namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Per
 public sealed class FileService : IFileService
 {
     private const string StyleFileSuffix = ".style.xml";
-    private static readonly Encoding Utf8Encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+    // 不强制 throwOnInvalidBytes，提升非标准编码文件的容错率
+    private static readonly Encoding Utf8Encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false);
 
     private readonly IDocumentSerializer _serializer;
     private readonly IMarkdownParser _parser;
@@ -36,7 +37,13 @@ public sealed class FileService : IFileService
         if (!File.Exists(fullMarkdownPath))
             throw new FileNotFoundException("Markdown file was not found.", fullMarkdownPath);
 
-        var markdown = await File.ReadAllTextAsync(fullMarkdownPath, Utf8Encoding, cancellationToken).ConfigureAwait(false);
+        // 使用 StreamReader 支持自适应 BOM 读取
+        string markdown;
+        using (var reader = new StreamReader(fullMarkdownPath, Utf8Encoding, detectEncodingFromByteOrderMarks: true))
+        {
+            markdown = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         var markdownHash = await ComputeHashAsync(fullMarkdownPath, cancellationToken).ConfigureAwait(false);
         var markdownInfo = new FileInfo(fullMarkdownPath);
 
@@ -98,12 +105,29 @@ public sealed class FileService : IFileService
         var markdownTemp = CreateTempPath(directory, Path.GetFileName(markdownFilePath));
         var styleTemp = CreateTempPath(directory, Path.GetFileName(styleFilePath));
 
+        // 备份文件路径（两阶段事务保护）
+        string? markdownBackup = null;
+        string? styleBackup = null;
+
         try
         {
             await WriteAllBytesAsync(markdownTemp, markdownBytes, cancellationToken).ConfigureAwait(false);
             await WriteAllBytesAsync(styleTemp, styleBytes, cancellationToken).ConfigureAwait(false);
 
             await EnsureNoExternalModificationAsync(markdownFilePath, styleFilePath, expectedSnapshot, cancellationToken).ConfigureAwait(false);
+
+            // 具备原子回滚能力的两阶段事务文件替换
+            if (File.Exists(markdownFilePath))
+            {
+                markdownBackup = CreateTempPath(directory, Path.GetFileName(markdownFilePath) + ".bak");
+                File.Copy(markdownFilePath, markdownBackup, overwrite: true);
+            }
+
+            if (File.Exists(styleFilePath))
+            {
+                styleBackup = CreateTempPath(directory, Path.GetFileName(styleFilePath) + ".bak");
+                File.Copy(styleFilePath, styleBackup, overwrite: true);
+            }
 
             ReplaceFileSafely(markdownTemp, markdownFilePath);
             markdownTemp = string.Empty;
@@ -119,10 +143,25 @@ public sealed class FileService : IFileService
 
             return new DocumentFileSnapshot(markdownFilePath, styleFilePath, markdownHash, styleHash, markdownInfo.LastWriteTimeUtc, styleInfo.LastWriteTimeUtc, StyleFileExists: true);
         }
+        catch
+        {
+            // 回滚原始文件
+            if (markdownBackup is not null && File.Exists(markdownBackup))
+            {
+                try { File.Copy(markdownBackup, markdownFilePath, overwrite: true); } catch { }
+            }
+            if (styleBackup is not null && File.Exists(styleBackup))
+            {
+                try { File.Copy(styleBackup, styleFilePath, overwrite: true); } catch { }
+            }
+            throw;
+        }
         finally
         {
             DeleteTempFileIfExists(markdownTemp);
             DeleteTempFileIfExists(styleTemp);
+            DeleteTempFileIfExists(markdownBackup);
+            DeleteTempFileIfExists(styleBackup);
         }
     }
 

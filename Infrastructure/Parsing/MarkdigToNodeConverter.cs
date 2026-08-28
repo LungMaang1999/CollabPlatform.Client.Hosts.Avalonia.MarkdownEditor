@@ -36,8 +36,7 @@ public sealed class MarkdigToNodeConverter
         {
             try
             {
-                #if DEBUG
-                // 仅在调试构建时保留详细 block 诊断，发布模式直接转换
+#if DEBUG
                 diagnostics.Add(new DiagnosticMessage
                 {
                     Severity = DiagnosticSeverity.Info,
@@ -45,7 +44,7 @@ public sealed class MarkdigToNodeConverter
                     Message = $"Block type: {block.GetType().FullName}; Span: {block.Span}",
                     Range = ExtractSourceRange(block)
                 });
-                #endif
+#endif
                 var node = ConvertBlock(block, diagnostics);
                 if (node is not null)
                 {
@@ -58,8 +57,7 @@ public sealed class MarkdigToNodeConverter
                 {
                     Severity = DiagnosticSeverity.Warning,
                     Code = "BLOCK_CONVERSION_FAILED",
-                    Message =
-                        $"Failed to convert block {block.GetType().FullName}: {ex.Message}",
+                    Message = $"Failed to convert block {block.GetType().FullName}: {ex.Message}",
                     Range = ExtractSourceRange(block)
                 });
             }
@@ -178,6 +176,7 @@ public sealed class MarkdigToNodeConverter
                 }
 
                 return tableNode;
+
             case FootnoteGroup footnoteGroup:
                 {
                     var groupNode = _nodeFactory.Create(
@@ -185,8 +184,6 @@ public sealed class MarkdigToNodeConverter
                         NodeCategory.Container,
                         range: range);
 
-                    // Markdig 的脚注扩展内部脚注列表顺序就是最终显示给用户的顺序编号。
-                    // 直接用枚举位置分配 1..N 的序号，和脚注引用端保持一致。
                     var footnoteIndex = 1;
                     foreach (var blockObj in footnoteGroup)
                     {
@@ -265,8 +262,7 @@ public sealed class MarkdigToNodeConverter
                 {
                     Severity = DiagnosticSeverity.Warning,
                     Code = "UNSUPPORTED_BLOCK_TYPE",
-                    Message =
-                        $"Unsupported block element: {block.GetType().FullName}",
+                    Message = $"Unsupported block element: {block.GetType().FullName}",
                     Range = range
                 });
 
@@ -275,9 +271,9 @@ public sealed class MarkdigToNodeConverter
     }
 
     private void ProcessInlines(
-    ContainerInline? container,
-    MarkdownNode parentNode,
-    ICollection<DiagnosticMessage> diagnostics)
+        ContainerInline? container,
+        MarkdownNode parentNode,
+        ICollection<DiagnosticMessage> diagnostics)
     {
         if (container is null)
         {
@@ -300,9 +296,8 @@ public sealed class MarkdigToNodeConverter
                     break;
 
                 case TaskList:
-                    // 任务状态已经在 ListItemBlock 层级通过 TryGetTaskState 读取。
-                    // 避免在段落内再次生成独立 TaskListItem，造成重复 checkbox 或者文本丢失。
                     break;
+
                 case EmphasisInline emphasis:
                     {
                         var inlineType = emphasis.DelimiterChar switch
@@ -331,6 +326,7 @@ public sealed class MarkdigToNodeConverter
                             text: code.Content,
                             range: range));
                     break;
+
                 case AutolinkInline autoLink:
                     AddAutoLinkNode(
                         autoLink.Url ?? string.Empty,
@@ -391,13 +387,15 @@ public sealed class MarkdigToNodeConverter
                         parentNode.AddChild(linkNode);
                         break;
                     }
-                case LineBreakInline lineBreak:
+
+                case LineBreakInline:
                     parentNode.AddChild(
                         _nodeFactory.Create(
                             NodeType.LineBreak,
                             NodeCategory.Inline,
                             range: range));
                     break;
+
                 case FootnoteLink footnoteLink:
                     {
                         var linkNode = _nodeFactory.Create(
@@ -405,8 +403,6 @@ public sealed class MarkdigToNodeConverter
                             NodeCategory.Inline,
                             range: range);
 
-                        // Markdig 中 FootnoteLink.Index 就是脚注在文档中出现的顺序序号，是 1-based 的 int。
-                        // Markdig 脚注扩展内部定义脚注时，会把对应的 FootnoteLink.Index 设好，和 FootnoteGroup 顺序严格对应。
                         var indexValue = footnoteLink.Index;
                         var indexText = indexValue.ToString();
 
@@ -418,6 +414,7 @@ public sealed class MarkdigToNodeConverter
                         parentNode.AddChild(linkNode);
                         break;
                     }
+
                 default:
                     if (inline is ContainerInline childContainer)
                     {
@@ -450,19 +447,31 @@ public sealed class MarkdigToNodeConverter
         var startLine = Math.Max(1, obj.Line + 1);
         var startColumn = Math.Max(1, obj.Column + 1);
 
+        int endLine = startLine;
+        int endColumn = startColumn + length;
+
+        // LeafBlock 包含 Lines 信息（如 ParagraphBlock, FencedCodeBlock 等）
+        if (obj is LeafBlock leafBlock && leafBlock.Lines.Lines != null && leafBlock.Lines.Count > 0)
+        {
+            endLine = startLine + leafBlock.Lines.Count - 1;
+            var lastSlice = leafBlock.Lines.Lines[leafBlock.Lines.Count - 1];
+            endColumn = lastSlice.Slice.Length + 1;
+        }
+
         return new SourceRange
         {
             StartOffset = startOffset,
             Length = length,
             StartLine = startLine,
             StartColumn = startColumn,
-            EndLine = startLine,
-            EndColumn = startColumn + length
+            EndLine = endLine,
+            EndColumn = endColumn
         };
     }
+
     private static bool TryGetTaskState(
-    ListItemBlock listItem,
-    out bool isChecked)
+        ListItemBlock listItem,
+        out bool isChecked)
     {
         isChecked = false;
 
@@ -485,6 +494,7 @@ public sealed class MarkdigToNodeConverter
 
         return false;
     }
+
     private static bool LooksLikeEmail(string value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -497,18 +507,17 @@ public sealed class MarkdigToNodeConverter
             && value.IndexOf('/') < 0
             && value[(at + 1)..].Contains('.');
     }
+
     private void AddAutoLinkNode(
-    string rawUrl,
-    SourceRange range,
-    MarkdownNode parentNode)
+        string rawUrl,
+        SourceRange range,
+        MarkdownNode parentNode)
     {
         var normalizedUrl = (rawUrl ?? string.Empty).Trim();
         var hrefValue = normalizedUrl;
         var displayValue = normalizedUrl;
 
-        if (normalizedUrl.StartsWith(
-                "mailto:",
-                StringComparison.OrdinalIgnoreCase))
+        if (normalizedUrl.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase))
         {
             displayValue = normalizedUrl["mailto:".Length..];
         }
@@ -529,6 +538,7 @@ public sealed class MarkdigToNodeConverter
 
         parentNode.AddChild(autoLinkNode);
     }
+
     private static string GetInlineText(MarkdownNode node)
     {
         if (node.Type == NodeType.Text)

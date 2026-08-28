@@ -30,7 +30,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
 
     private readonly object _ctsLock = new();
     private CancellationTokenSource? _previewCts;
-    private readonly TimeSpan _previewDebounceDelay = TimeSpan.FromMilliseconds(800);
+    private readonly TimeSpan _previewDebounceDelay = TimeSpan.FromMilliseconds(400);
     private bool _isDisposed;
     private long _previewVersion;
 
@@ -95,6 +95,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         _documentService.CurrentDocumentChanged += OnCurrentDocumentChanged;
         _documentService.HasUnsavedChangesChanged += OnHasUnsavedChangesChanged;
     }
+
     private void EnsureEditableDocument()
     {
         if (ActiveDocument is not null)
@@ -109,6 +110,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         _activeRenderer = _rendererFactory.Create(document);
         ErrorMessage = null;
     }
+
     private void OnCommandStateChanged(object? sender, EventArgs e)
     {
         RunOnUIThread(() =>
@@ -142,6 +144,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
             }
         });
     }
+
     public async Task OpenDocumentAsync(string filePath, CancellationToken ct = default)
     {
         try
@@ -204,7 +207,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         // 1. 刷新大纲 AST
         ActiveDocument.RefreshAst();
 
-        // 2. 规范化选择状态（若被选中的节点在编辑中被删除或变更）
+        // 2. 规范化选择状态
         document.NormalizeEditorState();
         if (!string.IsNullOrWhiteSpace(document.EditorState.SelectedNodeId))
         {
@@ -216,6 +219,8 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(nameof(IsModified));
         OnPropertyChanged(nameof(ActiveDocument));
     }
+
+    // 局部差异计算替换全量字符替换，防止撤销栈膨胀
     public void ApplySourceText(string? source)
     {
         EnsureEditableDocument();
@@ -225,18 +230,43 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         var document = ActiveDocument!.Document;
         var currentSource = document.SourceMarkdown;
 
-        if (string.Equals(
-                currentSource,
-                source,
-                StringComparison.Ordinal))
+        if (string.Equals(currentSource, source, StringComparison.Ordinal))
         {
             return;
         }
 
-        var fullDocumentRange = CreateFullDocumentRange(currentSource);
+        int prefixLen = 0;
+        int maxPrefix = Math.Min(currentSource.Length, source.Length);
+        while (prefixLen < maxPrefix && currentSource[prefixLen] == source[prefixLen])
+        {
+            prefixLen++;
+        }
 
-        ExecuteTextChange(fullDocumentRange, source);
+        int suffixLen = 0;
+        int maxSuffix = Math.Min(currentSource.Length - prefixLen, source.Length - prefixLen);
+        while (suffixLen < maxSuffix && currentSource[currentSource.Length - 1 - suffixLen] == source[source.Length - 1 - suffixLen])
+        {
+            suffixLen++;
+        }
+
+        int startOffset = prefixLen;
+        int oldLength = currentSource.Length - prefixLen - suffixLen;
+        int newLength = source.Length - prefixLen - suffixLen;
+
+        var replacement = source.Substring(startOffset, newLength);
+        var changeRange = new SourceRange
+        {
+            StartOffset = startOffset,
+            Length = oldLength,
+            StartLine = 1,
+            StartColumn = 1,
+            EndLine = 1,
+            EndColumn = 1
+        };
+
+        ExecuteTextChange(changeRange, replacement);
     }
+
     public void ExecuteHeadingChange(MarkdownNode headingNode, int newLevel)
     {
         if (ActiveDocument is null) return;
@@ -299,7 +329,12 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
 
                 token.ThrowIfCancellationRequested();
 
-                var result = renderer.Render(doc);
+                // 通过同步锁或在当前安全上下文执行渲染，避免并发遍历时 AST 集合被修改
+                RenderResult result;
+                lock (doc)
+                {
+                    result = renderer.Render(doc);
+                }
 
                 token.ThrowIfCancellationRequested();
 
@@ -365,34 +400,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(propertyName);
         return true;
     }
-    private static SourceRange CreateFullDocumentRange(string source)
-    {
-        var line = 1;
-        var column = 1;
 
-        foreach (var character in source)
-        {
-            if (character == '\n')
-            {
-                line++;
-                column = 1;
-            }
-            else
-            {
-                column++;
-            }
-        }
-
-        return new SourceRange
-        {
-            StartOffset = 0,
-            Length = source.Length,
-            StartLine = 1,
-            StartColumn = 1,
-            EndLine = line,
-            EndColumn = column
-        };
-    }
     public void Dispose()
     {
         lock (_ctsLock)
