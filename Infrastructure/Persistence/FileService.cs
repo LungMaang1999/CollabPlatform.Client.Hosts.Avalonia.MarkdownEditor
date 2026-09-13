@@ -1,5 +1,9 @@
-﻿using System.Security.Cryptography;
+﻿using System;
+using System.IO;
+using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Documents;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Parsing;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Documents;
@@ -10,7 +14,6 @@ namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Per
 public sealed class FileService : IFileService
 {
     private const string StyleFileSuffix = ".style.xml";
-    // 不强制 throwOnInvalidBytes，提升非标准编码文件的容错率
     private static readonly Encoding Utf8Encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false);
 
     private readonly IDocumentSerializer _serializer;
@@ -37,7 +40,6 @@ public sealed class FileService : IFileService
         if (!File.Exists(fullMarkdownPath))
             throw new FileNotFoundException("Markdown file was not found.", fullMarkdownPath);
 
-        // 使用 StreamReader 支持自适应 BOM 读取
         string markdown;
         using (var reader = new StreamReader(fullMarkdownPath, Utf8Encoding, detectEncodingFromByteOrderMarks: true))
         {
@@ -91,21 +93,23 @@ public sealed class FileService : IFileService
         Directory.CreateDirectory(directory);
         await EnsureNoExternalModificationAsync(markdownFilePath, styleFilePath, expectedSnapshot, cancellationToken).ConfigureAwait(false);
 
-        var markdownBytes = Utf8Encoding.GetBytes(document.SourceMarkdown ?? string.Empty);
+        byte[] markdownBytes;
+        lock (document)
+        {
+            markdownBytes = Utf8Encoding.GetBytes(document.SourceMarkdown ?? string.Empty);
+            document.Metadata.ModifiedUtc = DateTime.UtcNow;
+            document.Validate();
+        }
         var markdownHash = ComputeSha256(markdownBytes);
 
         await using var xmlMemoryStream = new MemoryStream();
-        document.Metadata.ModifiedUtc = DateTime.UtcNow;
-        document.Validate();
         _serializer.Serialize(document, xmlMemoryStream, Path.GetFileName(markdownFilePath), markdownHash);
-
         var styleBytes = xmlMemoryStream.ToArray();
         var styleHash = ComputeSha256(styleBytes);
 
         var markdownTemp = CreateTempPath(directory, Path.GetFileName(markdownFilePath));
         var styleTemp = CreateTempPath(directory, Path.GetFileName(styleFilePath));
 
-        // 备份文件路径（两阶段事务保护）
         string? markdownBackup = null;
         string? styleBackup = null;
 
@@ -116,7 +120,6 @@ public sealed class FileService : IFileService
 
             await EnsureNoExternalModificationAsync(markdownFilePath, styleFilePath, expectedSnapshot, cancellationToken).ConfigureAwait(false);
 
-            // 具备原子回滚能力的两阶段事务文件替换
             if (File.Exists(markdownFilePath))
             {
                 markdownBackup = CreateTempPath(directory, Path.GetFileName(markdownFilePath) + ".bak");
@@ -138,14 +141,16 @@ public sealed class FileService : IFileService
             var markdownInfo = new FileInfo(markdownFilePath);
             var styleInfo = new FileInfo(styleFilePath);
 
-            document.FilePath = markdownFilePath;
-            document.MarkSaved();
+            lock (document)
+            {
+                document.FilePath = markdownFilePath;
+                document.MarkSaved();
+            }
 
             return new DocumentFileSnapshot(markdownFilePath, styleFilePath, markdownHash, styleHash, markdownInfo.LastWriteTimeUtc, styleInfo.LastWriteTimeUtc, StyleFileExists: true);
         }
         catch
         {
-            // 回滚原始文件
             if (markdownBackup is not null && File.Exists(markdownBackup))
             {
                 try { File.Copy(markdownBackup, markdownFilePath, overwrite: true); } catch { }

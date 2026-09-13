@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Globalization;
 using System.Linq;
 using System.Xml.Linq;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Schema;
@@ -7,6 +8,8 @@ namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Per
 
 internal static class DocumentXmlWriter
 {
+    private static string FormatInvariant(double value) => value.ToString("G", CultureInfo.InvariantCulture);
+
     public static XDocument Write(DocumentPackageDto dto)
     {
         ArgumentNullException.ThrowIfNull(dto);
@@ -35,7 +38,7 @@ internal static class DocumentXmlWriter
 
             if (node.Level.HasValue)
             {
-                element.Add(new XElement(nsX + "Level", node.Level.Value));
+                element.Add(new XElement(nsX + "Level", node.Level.Value.ToString(CultureInfo.InvariantCulture)));
             }
 
             if (!string.IsNullOrWhiteSpace(node.StyleId))
@@ -52,7 +55,7 @@ internal static class DocumentXmlWriter
             {
                 var styleElement = new XElement(nsX + "LocalStyle");
 
-                void AddIf<T>(string name, T? value)
+                void AddIf(string name, string? value)
                 {
                     if (value is not null)
                     {
@@ -60,8 +63,16 @@ internal static class DocumentXmlWriter
                     }
                 }
 
+                void AddIfDouble(string name, double? value)
+                {
+                    if (value.HasValue)
+                    {
+                        styleElement.Add(new XElement(nsX + name, FormatInvariant(value.Value)));
+                    }
+                }
+
                 AddIf("FontFamily", node.LocalStyle.FontFamily);
-                AddIf("FontSize", node.LocalStyle.FontSize);
+                AddIfDouble("FontSize", node.LocalStyle.FontSize);
                 AddIf("ForegroundColor", node.LocalStyle.ForegroundColor);
                 AddIf("BackgroundColor", node.LocalStyle.BackgroundColor);
                 AddIf(
@@ -74,10 +85,10 @@ internal static class DocumentXmlWriter
                     node.LocalStyle.Italic.HasValue
                         ? node.LocalStyle.Italic.Value ? "1" : "0"
                         : null);
-                AddIf("LineHeight", node.LocalStyle.LineHeight);
+                AddIfDouble("LineHeight", node.LocalStyle.LineHeight);
                 AddIf("TextAlign", node.LocalStyle.TextAlign);
                 AddIf("BorderColor", node.LocalStyle.BorderColor);
-                AddIf("BorderWidth", node.LocalStyle.BorderWidth);
+                AddIfDouble("BorderWidth", node.LocalStyle.BorderWidth);
                 AddIf("CustomCss", node.LocalStyle.CustomCss);
 
                 if (node.LocalStyle.Margin is not null)
@@ -85,10 +96,10 @@ internal static class DocumentXmlWriter
                     styleElement.Add(
                         new XElement(
                             nsX + "Margin",
-                            new XElement(nsX + "Left", node.LocalStyle.Margin.Left),
-                            new XElement(nsX + "Top", node.LocalStyle.Margin.Top),
-                            new XElement(nsX + "Right", node.LocalStyle.Margin.Right),
-                            new XElement(nsX + "Bottom", node.LocalStyle.Margin.Bottom)));
+                            new XElement(nsX + "Left", FormatInvariant(node.LocalStyle.Margin.Left)),
+                            new XElement(nsX + "Top", FormatInvariant(node.LocalStyle.Margin.Top)),
+                            new XElement(nsX + "Right", FormatInvariant(node.LocalStyle.Margin.Right)),
+                            new XElement(nsX + "Bottom", FormatInvariant(node.LocalStyle.Margin.Bottom))));
                 }
 
                 if (node.LocalStyle.Padding is not null)
@@ -96,10 +107,10 @@ internal static class DocumentXmlWriter
                     styleElement.Add(
                         new XElement(
                             nsX + "Padding",
-                            new XElement(nsX + "Left", node.LocalStyle.Padding.Left),
-                            new XElement(nsX + "Top", node.LocalStyle.Padding.Top),
-                            new XElement(nsX + "Right", node.LocalStyle.Padding.Right),
-                            new XElement(nsX + "Bottom", node.LocalStyle.Padding.Bottom)));
+                            new XElement(nsX + "Left", FormatInvariant(node.LocalStyle.Padding.Left)),
+                            new XElement(nsX + "Top", FormatInvariant(node.LocalStyle.Padding.Top)),
+                            new XElement(nsX + "Right", FormatInvariant(node.LocalStyle.Padding.Right)),
+                            new XElement(nsX + "Bottom", FormatInvariant(node.LocalStyle.Padding.Bottom))));
                 }
 
                 if (styleElement.HasElements)
@@ -154,7 +165,7 @@ internal static class DocumentXmlWriter
             {
                 var styleValueElement = new XElement(nsX + "StyleValue");
 
-                void AddIf<T>(string name, T? value)
+                void AddIf(string name, string? value)
                 {
                     if (value is not null)
                     {
@@ -162,8 +173,16 @@ internal static class DocumentXmlWriter
                     }
                 }
 
+                void AddIfDouble(string name, double? value)
+                {
+                    if (value.HasValue)
+                    {
+                        styleValueElement.Add(new XElement(nsX + name, FormatInvariant(value.Value)));
+                    }
+                }
+
                 AddIf("FontFamily", style.Style.FontFamily);
-                AddIf("FontSize", style.Style.FontSize);
+                AddIfDouble("FontSize", style.Style.FontSize);
                 AddIf("ForegroundColor", style.Style.ForegroundColor);
                 AddIf("BackgroundColor", style.Style.BackgroundColor);
                 AddIf(
@@ -176,10 +195,10 @@ internal static class DocumentXmlWriter
                     style.Style.Italic.HasValue
                         ? style.Style.Italic.Value ? "1" : "0"
                         : null);
-                AddIf("LineHeight", style.Style.LineHeight);
+                AddIfDouble("LineHeight", style.Style.LineHeight);
                 AddIf("TextAlign", style.Style.TextAlign);
                 AddIf("BorderColor", style.Style.BorderColor);
-                AddIf("BorderWidth", style.Style.BorderWidth);
+                AddIfDouble("BorderWidth", style.Style.BorderWidth);
                 AddIf("CustomCss", style.Style.CustomCss);
 
                 if (style.Style.Margin is not null)
@@ -187,10 +206,10 @@ internal static class DocumentXmlWriter
                     styleValueElement.Add(
                         new XElement(
                             nsX + "Margin",
-                            new XElement(nsX + "Left", style.Style.Margin.Left),
-                            new XElement(nsX + "Top", style.Style.Margin.Top),
-                            new XElement(nsX + "Right", style.Style.Margin.Right),
-                            new XElement(nsX + "Bottom", style.Style.Margin.Bottom)));
+                            new XElement(nsX + "Left", FormatInvariant(style.Style.Margin.Left)),
+                            new XElement(nsX + "Top", FormatInvariant(style.Style.Margin.Top)),
+                            new XElement(nsX + "Right", FormatInvariant(style.Style.Margin.Right)),
+                            new XElement(nsX + "Bottom", FormatInvariant(style.Style.Margin.Bottom))));
                 }
 
                 if (style.Style.Padding is not null)
@@ -198,10 +217,10 @@ internal static class DocumentXmlWriter
                     styleValueElement.Add(
                         new XElement(
                             nsX + "Padding",
-                            new XElement(nsX + "Left", style.Style.Padding.Left),
-                            new XElement(nsX + "Top", style.Style.Padding.Top),
-                            new XElement(nsX + "Right", style.Style.Padding.Right),
-                            new XElement(nsX + "Bottom", style.Style.Padding.Bottom)));
+                            new XElement(nsX + "Left", FormatInvariant(style.Style.Padding.Left)),
+                            new XElement(nsX + "Top", FormatInvariant(style.Style.Padding.Top)),
+                            new XElement(nsX + "Right", FormatInvariant(style.Style.Padding.Right)),
+                            new XElement(nsX + "Bottom", FormatInvariant(style.Style.Padding.Bottom))));
                 }
 
                 if (styleValueElement.HasElements)
@@ -250,10 +269,10 @@ internal static class DocumentXmlWriter
                         dto.Document.EditorState.SelectedNodeId ?? string.Empty),
                     new XElement(
                         nsX + "CaretOffset",
-                        dto.Document.EditorState.CaretOffset),
+                        dto.Document.EditorState.CaretOffset.ToString(CultureInfo.InvariantCulture)),
                     new XElement(
                         nsX + "SelectionLength",
-                        dto.Document.EditorState.SelectionLength),
+                        dto.Document.EditorState.SelectionLength.ToString(CultureInfo.InvariantCulture)),
                     new XElement(
                         nsX + "ExpandedNodeIds",
                         dto.Document.EditorState.ExpandedNodeIds.Select(
@@ -279,10 +298,10 @@ internal static class DocumentXmlWriter
                         dto.Document.Metadata.Encoding ?? "utf-8"),
                     new XElement(
                         nsX + "CreatedUtc",
-                        dto.Document.Metadata.CreatedUtc.ToString("o")),
+                        dto.Document.Metadata.CreatedUtc.ToString("o", CultureInfo.InvariantCulture)),
                     new XElement(
                         nsX + "ModifiedUtc",
-                        dto.Document.Metadata.ModifiedUtc.ToString("o")),
+                        dto.Document.Metadata.ModifiedUtc.ToString("o", CultureInfo.InvariantCulture)),
                     new XElement(
                         nsX + "Properties",
                         dto.Document.Metadata.Properties.Select(property =>

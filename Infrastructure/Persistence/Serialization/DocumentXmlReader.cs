@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Xml.Linq;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Schema;
@@ -238,9 +240,22 @@ internal static class DocumentXmlReader
             return node;
         }
 
-        static double? TryParseDouble(string? s) => double.TryParse(s, out var v) ? v : null;
-        static int? TryParseInt(string? s) => int.TryParse(s, out var v) ? v : null;
-        static bool? TryParseBool(string? s) => s switch { "1" => true, "0" => false, "true" => true, "false" => false, _ => null };
-        static DateTime? TryParseDateTime(string? s) => DateTime.TryParse(s, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dt) ? dt : null;
+        static double? TryParseDouble(string? s) =>
+            double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : null;
+
+        static int? TryParseInt(string? s) =>
+            int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : null;
+
+        static bool? TryParseBool(string? s) => s switch
+        {
+            "1" => true,
+            "0" => false,
+            "true" or "True" => true,
+            "false" or "False" => false,
+            _ => null
+        };
+
+        static DateTime? TryParseDateTime(string? s) =>
+            DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dt) ? dt : null;
     }
 }

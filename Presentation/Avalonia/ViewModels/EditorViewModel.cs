@@ -1,18 +1,24 @@
-﻿using Avalonia.Threading;
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
+using Avalonia.Threading;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Documents;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Editing;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Rendering;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Threading;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Editing.Commands;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Documents;
-using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Styling;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Presentation.Avalonia.Services;
-using System.ComponentModel;
-using System.Runtime.CompilerServices;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Presentation.Avalonia.ViewModels;
 
+/// <summary>
+/// 主编辑器视图模型（高可靠并发安全与 Unicode 强化版）
+/// </summary>
 public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly IDocumentService _documentService;
@@ -30,25 +36,68 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
 
     private readonly object _ctsLock = new();
     private CancellationTokenSource? _previewCts;
-    private readonly TimeSpan _previewDebounceDelay = TimeSpan.FromMilliseconds(400);
+    private readonly TimeSpan _previewDebounceDelay = TimeSpan.FromMilliseconds(300);
     private bool _isDisposed;
     private long _previewVersion;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public DocumentViewModel? ActiveDocument
+    internal DocumentViewModel? ActiveDocument
     {
         get => _activeDocument;
         private set
         {
-            if (SetField(ref _activeDocument, value))
+            if (ReferenceEquals(_activeDocument, value)) return;
+
+            if (_activeDocument is not null)
             {
-                OnPropertyChanged(nameof(HasActiveDocument));
-                OnPropertyChanged(nameof(DocumentTitle));
-                OnPropertyChanged(nameof(IsModified));
+                _activeDocument.StyleMutated -= OnActiveDocumentStyleMutated;
+                _activeDocument.Dispose();
+            }
+
+            _activeDocument = value;
+
+            if (_activeDocument is not null)
+            {
+                _activeDocument.StyleMutated += OnActiveDocumentStyleMutated;
+            }
+
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(HasActiveDocument));
+            OnPropertyChanged(nameof(DocumentTitle));
+            OnPropertyChanged(nameof(IsModified));
+            OnPropertyChanged(nameof(RootNode));
+            OnPropertyChanged(nameof(CurrentSourceMarkdown));
+            OnPropertyChanged(nameof(DocumentRootNode));
+            OnPropertyChanged(nameof(CanUndo));
+            OnPropertyChanged(nameof(CanRedo));
+        }
+    }
+
+    #region 公开代理属性与方法
+
+    public NodeViewModel? RootNode => _activeDocument?.RootNode;
+    public MarkdownNode? DocumentRootNode => _activeDocument?.Document.Root;
+    public string CurrentSourceMarkdown => _activeDocument?.Document.SourceMarkdown ?? string.Empty;
+
+    public void SelectNodeById(string nodeId)
+    {
+        if (string.IsNullOrWhiteSpace(nodeId) || _activeDocument is null) return;
+        SelectionService.SelectById(_activeDocument.Document, nodeId);
+    }
+
+    public void SetCaretOffset(int offset)
+    {
+        if (_activeDocument?.Document is { } doc)
+        {
+            lock (doc)
+            {
+                doc.EditorState.CaretOffset = offset;
             }
         }
     }
+
+    #endregion
 
     public bool HasActiveDocument => _activeDocument is not null;
     public string DocumentTitle => _activeDocument?.Document.Metadata.Title is { Length: > 0 } title ? title : "Untitled";
@@ -74,7 +123,6 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
 
     public CommandManager CommandManager => _commandManager;
     public SelectionService SelectionService { get; } = new();
-
     public bool CanUndo => _commandManager.CanUndo;
     public bool CanRedo => _commandManager.CanRedo;
 
@@ -96,52 +144,12 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         _documentService.HasUnsavedChangesChanged += OnHasUnsavedChangesChanged;
     }
 
-    private void EnsureEditableDocument()
-    {
-        if (ActiveDocument is not null)
-            return;
-
-        var document = new MarkdownDocument
-        {
-            FilePath = string.Empty
-        };
-
-        ActiveDocument = new DocumentViewModel(document);
-        _activeRenderer = _rendererFactory.Create(document);
-        ErrorMessage = null;
-    }
-
-    private void OnCommandStateChanged(object? sender, EventArgs e)
+    private void OnActiveDocumentStyleMutated()
     {
         RunOnUIThread(() =>
         {
-            OnPropertyChanged(nameof(CanUndo));
-            OnPropertyChanged(nameof(CanRedo));
             OnPropertyChanged(nameof(IsModified));
-        });
-    }
-
-    private void OnHasUnsavedChangesChanged(object? sender, bool hasChanges)
-    {
-        RunOnUIThread(() => OnPropertyChanged(nameof(IsModified)));
-    }
-
-    private void OnCurrentDocumentChanged(object? sender, MarkdownDocument? doc)
-    {
-        RunOnUIThread(() =>
-        {
-            if (doc is null)
-            {
-                ActiveDocument = null;
-                _activeRenderer = null;
-                HtmlPreview = string.Empty;
-            }
-            else
-            {
-                ActiveDocument = new DocumentViewModel(doc);
-                _activeRenderer = _rendererFactory.Create(doc);
-                ScheduleUpdatePreview(immediate: true);
-            }
+            ScheduleUpdatePreview();
         });
     }
 
@@ -157,6 +165,12 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
 
             await _documentService.OpenAsync(filePath, ct).ConfigureAwait(false);
             _commandManager.Clear();
+
+            RunOnUIThread(() =>
+            {
+                OnPropertyChanged(nameof(CanUndo));
+                OnPropertyChanged(nameof(CanRedo));
+            });
         }
         catch (Exception ex)
         {
@@ -196,50 +210,55 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
     public void ExecuteTextChange(SourceRange range, string? replacement)
     {
         ArgumentNullException.ThrowIfNull(range);
-
         EnsureEditableDocument();
 
         var document = ActiveDocument!.Document;
         var cmd = new ChangeTextCommand(document, _editApplier, _sourceEditor, range, replacement ?? string.Empty);
 
-        _commandManager.Execute(cmd);
-
-        // 1. 刷新大纲 AST
-        ActiveDocument.RefreshAst();
-
-        // 2. 规范化选择状态
-        document.NormalizeEditorState();
-        if (!string.IsNullOrWhiteSpace(document.EditorState.SelectedNodeId))
+        lock (document)
         {
-            SelectionService.SelectById(document, document.EditorState.SelectedNodeId);
+            _commandManager.Execute(cmd);
+            ActiveDocument.RefreshAst();
+            document.NormalizeEditorState();
+
+            if (!string.IsNullOrWhiteSpace(document.EditorState.SelectedNodeId))
+            {
+                SelectionService.SelectById(document, document.EditorState.SelectedNodeId);
+            }
         }
 
-        // 3. 调度 HTML 预览刷新与属性通知
         ScheduleUpdatePreview();
         OnPropertyChanged(nameof(IsModified));
         OnPropertyChanged(nameof(ActiveDocument));
+        OnPropertyChanged(nameof(RootNode));
+        OnPropertyChanged(nameof(CurrentSourceMarkdown));
+        OnPropertyChanged(nameof(DocumentRootNode));
+        OnPropertyChanged(nameof(CanUndo));
+        OnPropertyChanged(nameof(CanRedo));
     }
 
-    // 局部差异计算替换全量字符替换，防止撤销栈膨胀
     public void ApplySourceText(string? source)
     {
         EnsureEditableDocument();
 
         source ??= string.Empty;
-
         var document = ActiveDocument!.Document;
-        var currentSource = document.SourceMarkdown;
+        var currentSource = document.SourceMarkdown ?? string.Empty;
 
         if (string.Equals(currentSource, source, StringComparison.Ordinal))
-        {
             return;
-        }
 
         int prefixLen = 0;
         int maxPrefix = Math.Min(currentSource.Length, source.Length);
         while (prefixLen < maxPrefix && currentSource[prefixLen] == source[prefixLen])
         {
             prefixLen++;
+        }
+
+        // 避免在 Unicode 代理对中间截断
+        if (prefixLen > 0 && prefixLen < currentSource.Length && char.IsLowSurrogate(currentSource[prefixLen]))
+        {
+            prefixLen--;
         }
 
         int suffixLen = 0;
@@ -249,64 +268,142 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
             suffixLen++;
         }
 
+        if (suffixLen > 0 && currentSource.Length - suffixLen > 0 && char.IsHighSurrogate(currentSource[currentSource.Length - suffixLen - 1]))
+        {
+            suffixLen--;
+        }
+
         int startOffset = prefixLen;
         int oldLength = currentSource.Length - prefixLen - suffixLen;
         int newLength = source.Length - prefixLen - suffixLen;
 
         var replacement = source.Substring(startOffset, newLength);
+
+        var (startLine, startCol) = CalculateLineAndColumn(currentSource, startOffset);
+        var (endLine, endCol) = CalculateLineAndColumn(currentSource, startOffset + oldLength);
+
         var changeRange = new SourceRange
         {
             StartOffset = startOffset,
             Length = oldLength,
-            StartLine = 1,
-            StartColumn = 1,
-            EndLine = 1,
-            EndColumn = 1
+            StartLine = startLine,
+            StartColumn = startCol,
+            EndLine = endLine,
+            EndColumn = endCol
         };
 
         ExecuteTextChange(changeRange, replacement);
     }
 
-    public void ExecuteHeadingChange(MarkdownNode headingNode, int newLevel)
+    #region Markdown 快捷编辑增强
+
+    public void WrapSelection(int selectionStart, int selectionLength, string prefix, string suffix)
     {
-        if (ActiveDocument is null) return;
-        var cmd = new ChangeHeadingLevelCommand(ActiveDocument.Document, _editApplier, _sourceEditor, headingNode, newLevel);
-        _commandManager.Execute(cmd);
-        ScheduleUpdatePreview();
+        EnsureEditableDocument();
+        var doc = ActiveDocument!.Document;
+        var source = doc.SourceMarkdown ?? string.Empty;
+
+        if (selectionStart < 0 || selectionStart > source.Length) return;
+
+        // 对齐代理对边界
+        int safeStart = selectionStart;
+        if (safeStart > 0 && safeStart < source.Length && char.IsLowSurrogate(source[safeStart]))
+        {
+            safeStart--;
+        }
+
+        int safeEnd = Math.Min(source.Length, safeStart + Math.Max(0, selectionLength));
+        if (safeEnd > 0 && safeEnd < source.Length && char.IsHighSurrogate(source[safeEnd - 1]))
+        {
+            safeEnd++;
+        }
+
+        int length = safeEnd - safeStart;
+        var selectedText = source.Substring(safeStart, length);
+        string replacement;
+
+        if (selectedText.StartsWith(prefix, StringComparison.Ordinal) && selectedText.EndsWith(suffix, StringComparison.Ordinal) &&
+            selectedText.Length >= prefix.Length + suffix.Length)
+        {
+            replacement = selectedText.Substring(prefix.Length, selectedText.Length - prefix.Length - suffix.Length);
+        }
+        else
+        {
+            replacement = $"{prefix}{selectedText}{suffix}";
+        }
+
+        var (startLine, startCol) = CalculateLineAndColumn(source, safeStart);
+        var (endLine, endCol) = CalculateLineAndColumn(source, safeEnd);
+
+        var range = new SourceRange
+        {
+            StartOffset = safeStart,
+            Length = length,
+            StartLine = startLine,
+            StartColumn = startCol,
+            EndLine = endLine,
+            EndColumn = endCol
+        };
+
+        ExecuteTextChange(range, replacement);
     }
+
+    public void ToggleBold(int selectionStart, int selectionLength) => WrapSelection(selectionStart, selectionLength, "**", "**");
+    public void ToggleItalic(int selectionStart, int selectionLength) => WrapSelection(selectionStart, selectionLength, "*", "*");
+    public void ToggleCode(int selectionStart, int selectionLength) => WrapSelection(selectionStart, selectionLength, "`", "`");
+
+    #endregion
 
     public void Undo()
     {
-        if (_commandManager.Undo())
+        if (ActiveDocument is null) return;
+        var doc = ActiveDocument.Document;
+
+        lock (doc)
         {
-            ActiveDocument?.RefreshAst();
-            ScheduleUpdatePreview();
-            OnPropertyChanged(nameof(IsModified));
+            if (!_commandManager.Undo()) return;
+            ActiveDocument.RefreshAst();
         }
+
+        ScheduleUpdatePreview();
+        OnPropertyChanged(nameof(IsModified));
+        OnPropertyChanged(nameof(RootNode));
+        OnPropertyChanged(nameof(CurrentSourceMarkdown));
+        OnPropertyChanged(nameof(DocumentRootNode));
+        OnPropertyChanged(nameof(CanUndo));
+        OnPropertyChanged(nameof(CanRedo));
     }
 
     public void Redo()
     {
-        if (_commandManager.Redo())
+        if (ActiveDocument is null) return;
+        var doc = ActiveDocument.Document;
+
+        lock (doc)
         {
-            ActiveDocument?.RefreshAst();
-            ScheduleUpdatePreview();
-            OnPropertyChanged(nameof(IsModified));
+            if (!_commandManager.Redo()) return;
+            ActiveDocument.RefreshAst();
         }
+
+        ScheduleUpdatePreview();
+        OnPropertyChanged(nameof(IsModified));
+        OnPropertyChanged(nameof(RootNode));
+        OnPropertyChanged(nameof(CurrentSourceMarkdown));
+        OnPropertyChanged(nameof(DocumentRootNode));
+        OnPropertyChanged(nameof(CanUndo));
+        OnPropertyChanged(nameof(CanRedo));
     }
 
     public void ScheduleUpdatePreview(bool immediate = false)
     {
-        if (_isDisposed || ActiveDocument is null)
-            return;
+        if (_isDisposed || ActiveDocument is null) return;
 
         CancellationToken token;
         var previewVersion = Interlocked.Increment(ref _previewVersion);
 
         lock (_ctsLock)
         {
-            if (_isDisposed)
-                return;
+            if (_isDisposed) return;
 
             _previewCts?.Cancel();
             _previewCts?.Dispose();
@@ -323,13 +420,11 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
             {
                 if (!immediate)
                 {
-                    await Task.Delay(_previewDebounceDelay, token)
-                        .ConfigureAwait(false);
+                    await Task.Delay(_previewDebounceDelay, token).ConfigureAwait(false);
                 }
 
                 token.ThrowIfCancellationRequested();
 
-                // 通过同步锁或在当前安全上下文执行渲染，避免并发遍历时 AST 集合被修改
                 RenderResult result;
                 lock (doc)
                 {
@@ -340,31 +435,92 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
 
                 RunOnUIThread(() =>
                 {
-                    if (token.IsCancellationRequested ||
-                        previewVersion != Volatile.Read(ref _previewVersion) ||
-                        _isDisposed)
-                    {
+                    if (token.IsCancellationRequested || previewVersion != Volatile.Read(ref _previewVersion) || _isDisposed)
                         return;
-                    }
 
                     HtmlPreview = result.Html;
                 });
             }
             catch (OperationCanceledException)
             {
+                // 防抖正常取消
             }
             catch (Exception ex)
             {
                 RunOnUIThread(() =>
                 {
-                    if (!_isDisposed &&
-                        previewVersion == Volatile.Read(ref _previewVersion))
+                    if (!_isDisposed && previewVersion == Volatile.Read(ref _previewVersion))
                     {
-                        ErrorMessage = $"Render error: {ex.Message}";
+                        ErrorMessage = $"Render preview error: {ex.Message}";
                     }
                 });
             }
         }, token);
+    }
+
+    private static (int line, int column) CalculateLineAndColumn(string text, int offset)
+    {
+        int line = 1;
+        int lastLineBreak = -1;
+        int clampedOffset = Math.Clamp(offset, 0, text.Length);
+
+        for (int i = 0; i < clampedOffset; i++)
+        {
+            if (text[i] == '\n')
+            {
+                line++;
+                lastLineBreak = i;
+            }
+        }
+
+        int column = clampedOffset - lastLineBreak;
+        return (line, Math.Max(1, column));
+    }
+
+    private void EnsureEditableDocument()
+    {
+        if (ActiveDocument is not null) return;
+
+        var document = new MarkdownDocument { FilePath = string.Empty };
+        ActiveDocument = new DocumentViewModel(document, _uiDispatcher);
+        _activeRenderer = _rendererFactory.Create(document);
+        ErrorMessage = null;
+    }
+
+    private void OnCommandStateChanged(object? sender, EventArgs e)
+    {
+        RunOnUIThread(() =>
+        {
+            OnPropertyChanged(nameof(CanUndo));
+            OnPropertyChanged(nameof(CanRedo));
+            OnPropertyChanged(nameof(IsModified));
+        });
+    }
+
+    private void OnHasUnsavedChangesChanged(object? sender, bool hasChanges)
+    {
+        RunOnUIThread(() => OnPropertyChanged(nameof(IsModified)));
+    }
+
+    private void OnCurrentDocumentChanged(object? sender, MarkdownDocument? doc)
+    {
+        RunOnUIThread(() =>
+        {
+            if (doc is null)
+            {
+                ActiveDocument = null;
+                _activeRenderer = null;
+                HtmlPreview = string.Empty;
+            }
+            else
+            {
+                ActiveDocument = new DocumentViewModel(doc, _uiDispatcher);
+                _activeRenderer = _rendererFactory.Create(doc);
+                ScheduleUpdatePreview(immediate: true);
+            }
+            OnPropertyChanged(nameof(CanUndo));
+            OnPropertyChanged(nameof(CanRedo));
+        });
     }
 
     private void RunOnUIThread(Action action)
@@ -411,6 +567,13 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
             _previewCts?.Cancel();
             _previewCts?.Dispose();
             _previewCts = null;
+        }
+
+        if (_activeDocument is not null)
+        {
+            _activeDocument.StyleMutated -= OnActiveDocumentStyleMutated;
+            _activeDocument.Dispose();
+            _activeDocument = null;
         }
 
         _commandManager.CommandStateChanged -= OnCommandStateChanged;

@@ -1,4 +1,5 @@
-﻿using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Documents;
+﻿using System;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Documents;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Editing;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Parsing;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Rendering;
@@ -12,7 +13,6 @@ using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Renderi
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Presentation.Avalonia.Services;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Presentation.Avalonia.ViewModels;
 using Microsoft.Extensions.DependencyInjection;
-using System;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Presentation.Avalonia.Composition;
 
@@ -45,11 +45,13 @@ public static class MarkdownEditorServiceCollectionExtensions
         // Rendering factory  
         services.AddTransient<IDocumentRendererFactory, HtmlRendererFactory>();
 
-        // ViewModels  
-        services.AddTransient<EditorViewModel>();
-
+        // Thread dispatcher & services
         services.AddSingleton<IUiThreadDispatcher, SynchronizationContextUiThreadDispatcher>();
         services.AddSingleton<IFileWatcherService, FileWatcherService>();
+
+        // ViewModels
+        services.AddTransient<EditorViewModel>();
+
         return services;
     }
 }

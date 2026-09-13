@@ -1,63 +1,89 @@
-﻿using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Styling;
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Persistence.Serialization;
 
-namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Rendering.Html;
+namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Rendering;
 
 /// <summary>
-/// Converts ComputedStyle value objects into inline CSS string declarations.
+/// 内部 CSS 样式生成器，对齐持久化 DTO 模型
 /// </summary>
-public sealed class CssStyleBuilder
+internal sealed class CssStyleBuilder
 {
-    public string Build(ComputedStyle style)
+    public string Build(NodeStyleDto? style)
     {
-        ArgumentNullException.ThrowIfNull(style);
-        var css = new StringBuilder();
+        if (style is null) return string.Empty;
 
-        Append(css, "font-family", style.FontFamily);
-        Append(css, "font-size", style.FontSize, "px");
-        Append(css, "color", style.ForegroundColor);
-        Append(css, "background-color", style.BackgroundColor);
+        var sb = new StringBuilder(128);
 
-        if (style.Bold == true) Append(css, "font-weight", "bold");
-        if (style.Italic == true) Append(css, "font-style", "italic");
+        Append(sb, "font-family", string.IsNullOrWhiteSpace(style.FontFamily) ? null : $"'{style.FontFamily}'");
+        Append(sb, "font-size", style.FontSize, "pt");
+        Append(sb, "color", style.ForegroundColor);
+        Append(sb, "background-color", style.BackgroundColor);
 
-        Append(css, "line-height", style.LineHeight);
-        Append(css, "text-align", style.TextAlign);
+        if (style.Bold.HasValue)
+            Append(sb, "font-weight", style.Bold.Value ? "bold" : "normal");
 
-        AppendThickness(css, "margin", style.Margin);
-        AppendThickness(css, "padding", style.Padding);
+        if (style.Italic.HasValue)
+            Append(sb, "font-style", style.Italic.Value ? "italic" : "normal");
 
-        Append(css, "border-color", style.BorderColor);
-        Append(css, "border-width", style.BorderWidth, "px");
-        if ((style.BorderWidth.HasValue && style.BorderWidth > 0) || !string.IsNullOrWhiteSpace(style.BorderColor))
-            Append(css, "border-style", "solid");
+        Append(sb, "line-height", style.LineHeight);
+        Append(sb, "text-align", style.TextAlign);
 
+        // 边框逻辑：只有当颜色和边框宽度同时有效时生成
+        if (!string.IsNullOrWhiteSpace(style.BorderColor) && style.BorderWidth is > 0)
+        {
+            var widthStr = style.BorderWidth.Value.ToString(CultureInfo.InvariantCulture);
+            Append(sb, "border", $"{widthStr}px solid {style.BorderColor}");
+        }
+
+        // 外边距与内边距
+        AppendThickness(sb, "margin", style.Margin);
+        AppendThickness(sb, "padding", style.Padding);
+
+        // 自定义 CSS 拼接
         if (!string.IsNullOrWhiteSpace(style.CustomCss))
-            css.Append(style.CustomCss.Trim().TrimEnd(';')).Append(';');
+        {
+            var trimmed = style.CustomCss.Trim();
+            sb.Append(trimmed);
+            if (!trimmed.EndsWith(';'))
+            {
+                sb.Append(';');
+            }
+            sb.Append(' ');
+        }
 
-        return css.ToString();
+        return sb.ToString().TrimEnd();
     }
 
-    private static void Append(StringBuilder css, string name, string? value)
+    #region 私有辅助函数
+
+    private static void AppendThickness(StringBuilder css, string name, ThicknessValueDto? thickness)
     {
-        if (!string.IsNullOrWhiteSpace(value))
-            css.Append(name).Append(':').Append(value).Append(';');
+        if (thickness is null) return;
+
+        // 如果上下左右全为 0，跳过输出
+        if (thickness.Left == 0 && thickness.Top == 0 && thickness.Right == 0 && thickness.Bottom == 0)
+            return;
+
+        var left = thickness.Left.ToString(CultureInfo.InvariantCulture);
+        var top = thickness.Top.ToString(CultureInfo.InvariantCulture);
+        var right = thickness.Right.ToString(CultureInfo.InvariantCulture);
+        var bottom = thickness.Bottom.ToString(CultureInfo.InvariantCulture);
+
+        css.Append(CultureInfo.InvariantCulture, $"{name}: {top}px {right}px {bottom}px {left}px; ");
     }
 
     private static void Append(StringBuilder css, string name, double? value, string unit = "")
     {
-        if (value.HasValue)
-            css.Append(name).Append(':').Append(value.Value.ToString("R", CultureInfo.InvariantCulture)).Append(unit).Append(';');
+        if (!value.HasValue || value.Value <= 0) return;
+        css.Append(CultureInfo.InvariantCulture, $"{name}: {value.Value}{unit}; ");
     }
 
-    private static void AppendThickness(StringBuilder css, string name, ThicknessValue? thickness)
+    private static void Append(StringBuilder css, string name, string? value)
     {
-        if (thickness is null) return;
-        css.Append(name).Append(':')
-           .Append(thickness.Top.ToString("R", CultureInfo.InvariantCulture)).Append("px ")
-           .Append(thickness.Right.ToString("R", CultureInfo.InvariantCulture)).Append("px ")
-           .Append(thickness.Bottom.ToString("R", CultureInfo.InvariantCulture)).Append("px ")
-           .Append(thickness.Left.ToString("R", CultureInfo.InvariantCulture)).Append("px;");
+        if (string.IsNullOrWhiteSpace(value)) return;
+        css.Append(CultureInfo.InvariantCulture, $"{name}: {value}; ");
     }
+
+    #endregion
 }

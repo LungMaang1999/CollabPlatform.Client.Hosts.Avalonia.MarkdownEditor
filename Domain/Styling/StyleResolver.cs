@@ -1,17 +1,18 @@
-﻿using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Documents;
+﻿using System;
+using System.Collections.Generic;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Documents;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Styling;
 
 /// <summary>
-/// 高性能样式级联解析器（线程安全与零堆内存分配祖先回溯）
+/// 高性能样式级联解析器（采用一致锁序与零死锁保障）
 /// </summary>
 public sealed class StyleResolver : IStyleResolver
 {
     private readonly MarkdownDocument _document;
     private readonly StyleCache _cache;
     private long _cacheRevision = -1;
-    private readonly object _syncLock = new();
 
     public StyleResolver(MarkdownDocument document, StyleCache? cache = null)
     {
@@ -23,7 +24,7 @@ public sealed class StyleResolver : IStyleResolver
     {
         ArgumentNullException.ThrowIfNull(node);
 
-        lock (_syncLock)
+        lock (_document)
         {
             EnsureCacheIsCurrent();
 
@@ -46,7 +47,7 @@ public sealed class StyleResolver : IStyleResolver
                 ApplyReferencedStyle(result, node.StyleId, visited);
             }
 
-            // 4. Section Local Styles (由外向内递归回溯，零堆分配)
+            // 4. Section Local Styles (由外向内递归回溯)
             ApplySectionAncestorsStyle(result, node.Parent);
 
             // 5. Node Local Style
@@ -59,7 +60,7 @@ public sealed class StyleResolver : IStyleResolver
 
     public void Invalidate(MarkdownNode? node = null)
     {
-        lock (_syncLock)
+        lock (_document)
         {
             _cache.Invalidate(node);
             _cacheRevision = _document.Revision;
@@ -68,7 +69,7 @@ public sealed class StyleResolver : IStyleResolver
 
     public void Clear()
     {
-        lock (_syncLock)
+        lock (_document)
         {
             _cache.Clear();
             _cacheRevision = _document.Revision;
@@ -122,13 +123,11 @@ public sealed class StyleResolver : IStyleResolver
     {
         if (parent is null) return;
 
-        // 递归传递至最顶层祖先
         if (parent.Parent is not null)
         {
             ApplySectionAncestorsStyle(target, parent.Parent);
         }
 
-        // 归程执行：由外向内覆盖
         if (parent.Type == NodeType.Section)
         {
             target.Apply(parent.LocalStyle);

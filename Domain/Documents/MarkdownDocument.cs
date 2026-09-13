@@ -1,6 +1,10 @@
-﻿using System.Globalization;
+﻿using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Styling;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Validation;
@@ -8,7 +12,7 @@ using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Validation;
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Documents;
 
 /// <summary>
-/// 核心聚合根：表示包含 AST 树、样式表、元数据和编辑器状态的 Markdown 文档。
+/// 核心聚合根：Markdown 文档
 /// </summary>
 public sealed class MarkdownDocument
 {

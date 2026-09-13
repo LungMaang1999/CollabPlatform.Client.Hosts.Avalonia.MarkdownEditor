@@ -5,7 +5,6 @@ using Markdig.Extensions.Footnotes;
 using Markdig.Extensions.Tables;
 using Markdig.Extensions.TaskLists;
 using Markdig.Extensions.Yaml;
-using Markdig.Helpers;
 using Markdig.Syntax;
 using Markdig.Syntax.Inlines;
 
@@ -36,15 +35,6 @@ public sealed class MarkdigToNodeConverter
         {
             try
             {
-#if DEBUG
-                diagnostics.Add(new DiagnosticMessage
-                {
-                    Severity = DiagnosticSeverity.Info,
-                    Code = "DEBUG_BLOCK_TYPE",
-                    Message = $"Block type: {block.GetType().FullName}; Span: {block.Span}",
-                    Range = ExtractSourceRange(block)
-                });
-#endif
                 var node = ConvertBlock(block, diagnostics);
                 if (node is not null)
                 {
@@ -76,11 +66,13 @@ public sealed class MarkdigToNodeConverter
                 var headingNode = _nodeFactory.Create(NodeType.Heading, NodeCategory.Block, range: range);
                 headingNode.Level = heading.Level;
                 ProcessInlines(heading.Inline, headingNode, diagnostics);
+                headingNode.Text = GetInlineText(headingNode);
                 return headingNode;
 
             case ParagraphBlock paragraph:
                 var paragraphNode = _nodeFactory.Create(NodeType.Paragraph, NodeCategory.Block, range: range);
                 ProcessInlines(paragraph.Inline, paragraphNode, diagnostics);
+                paragraphNode.Text = GetInlineText(paragraphNode);
                 return paragraphNode;
 
             case ListBlock listBlock:
@@ -117,6 +109,7 @@ public sealed class MarkdigToNodeConverter
                         itemNode.AddChild(child);
                     }
 
+                    itemNode.Text = GetInlineText(itemNode);
                     listNode.AddChild(itemNode);
                 }
 
@@ -169,6 +162,7 @@ public sealed class MarkdigToNodeConverter
                             cellNode.AddChild(child);
                         }
 
+                        cellNode.Text = GetInlineText(cellNode);
                         rowNode.AddChild(cellNode);
                     }
 
@@ -450,7 +444,6 @@ public sealed class MarkdigToNodeConverter
         int endLine = startLine;
         int endColumn = startColumn + length;
 
-        // LeafBlock 包含 Lines 信息（如 ParagraphBlock, FencedCodeBlock 等）
         if (obj is LeafBlock leafBlock && leafBlock.Lines.Lines != null && leafBlock.Lines.Count > 0)
         {
             endLine = startLine + leafBlock.Lines.Count - 1;

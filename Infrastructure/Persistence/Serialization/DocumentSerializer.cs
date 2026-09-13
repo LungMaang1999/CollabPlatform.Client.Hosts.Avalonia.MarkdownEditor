@@ -1,8 +1,10 @@
-﻿using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Documents;
-using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Documents;
-using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Schema;
+﻿using System;
+using System.IO;
 using System.Text;
 using System.Xml.Linq;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Documents;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Documents;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Schema;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Persistence.Serialization;
 
@@ -38,14 +40,20 @@ public sealed class DocumentSerializer : IDocumentSerializer
 
         var xml = DocumentXmlWriter.Write(dto);
 
-        using var writer = new StreamWriter(
+        using (var writer = new StreamWriter(
             destination,
             new UTF8Encoding(false),
             bufferSize: 4096,
-            leaveOpen: true);
+            leaveOpen: true))
+        {
+            writer.Write(xml.ToString(SaveOptions.DisableFormatting));
+            writer.Flush();
+        }
 
-        writer.Write(xml.ToString(SaveOptions.DisableFormatting));
-        writer.Flush();
+        if (destination.CanSeek)
+        {
+            destination.Position = 0;
+        }
     }
 
     public MarkdownDocument Deserialize(
@@ -54,6 +62,11 @@ public sealed class DocumentSerializer : IDocumentSerializer
         string sourceFilePath = "")
     {
         ArgumentNullException.ThrowIfNull(source);
+
+        if (source.CanSeek && source.Position != 0)
+        {
+            source.Position = 0;
+        }
 
         var xml = XDocument.Load(source, LoadOptions.PreserveWhitespace);
         var migrated = SchemaMigrator.PrepareForReading(xml);

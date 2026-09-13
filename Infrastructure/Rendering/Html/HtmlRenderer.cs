@@ -1,27 +1,37 @@
-﻿using System.Net;
+﻿using System;
+using System.Collections.Generic;
+using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Diagnostics;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Rendering;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Documents;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Styling;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Exporting.Html;
+using ExportingCssStyleBuilder = CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Exporting.Html.CssStyleBuilder;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Rendering.Html;
 
-public sealed class HtmlRenderer : IDocumentRenderer
+/// <summary>
+/// 高性能安全 Markdown HTML 渲染器
+/// </summary>
+internal sealed class HtmlRenderer : IDocumentRenderer
 {
     private static readonly HashSet<string> AllowedUriSchemes = new(StringComparer.OrdinalIgnoreCase)
     {
         "http", "https", "mailto", "tel"
     };
 
-    private readonly IStyleResolver _styleResolver;
-    private readonly CssStyleBuilder _cssStyleBuilder;
+    private static readonly Regex UnsafeUriCharRegex = new(@"[\u0000-\u001F\u007F\s]", RegexOptions.Compiled);
 
-    public HtmlRenderer(IStyleResolver styleResolver, CssStyleBuilder? cssStyleBuilder = null)
+    private readonly IStyleResolver _styleResolver;
+    private readonly ICssStyleBuilder _cssStyleBuilder;
+
+    public HtmlRenderer(IStyleResolver styleResolver, ICssStyleBuilder? cssStyleBuilder = null)
     {
         _styleResolver = styleResolver ?? throw new ArgumentNullException(nameof(styleResolver));
-        _cssStyleBuilder = cssStyleBuilder ?? new CssStyleBuilder();
+        _cssStyleBuilder = cssStyleBuilder ?? new ExportingCssStyleBuilder();
     }
 
     public RenderResult Render(MarkdownDocument document)
@@ -71,23 +81,17 @@ public sealed class HtmlRenderer : IDocumentRenderer
                     break;
                 case NodeType.TaskListItem:
                     {
-                        var isChecked =
-                            node.Attributes.TryGetValue("checked", out var checkedValue)
-                            && string.Equals(
-                                checkedValue,
-                                "true",
-                                StringComparison.OrdinalIgnoreCase);
+                        var isChecked = node.Attributes.TryGetValue("checked", out var checkedValue) &&
+                                        string.Equals(checkedValue, "true", StringComparison.OrdinalIgnoreCase);
 
-                        html.Append("<li class=\"task-list-item\">");
-                        html.Append("<input type=\"checkbox\" disabled");
-
-                        if (isChecked)
-                        {
-                            html.Append(" checked");
-                        }
-
+                        html.Append("<li class=\"task-list-item\"");
+                        AppendNodeAttributes(node, html);
+                        AppendStyle(node, html);
+                        html.Append("><input type=\"checkbox\" disabled");
+                        if (isChecked) html.Append(" checked");
                         html.Append("> ");
-                        RenderListItemChildren(node, html, diagnostics);
+
+                        RenderTightContainerChildren(node, html, diagnostics);
                         html.Append("</li>");
                         break;
                     }
@@ -96,44 +100,34 @@ public sealed class HtmlRenderer : IDocumentRenderer
                     RenderChildren(node, html, diagnostics);
                     html.Append("</ol></section>");
                     break;
-
                 case NodeType.Footnote:
                     {
-                        var index = node.Attributes.TryGetValue("index", out var value)
-                            ? value
-                            : node.Text;
+                        var index = node.Attributes.TryGetValue("index", out var value) ? value : node.Text;
 
                         html.Append("<li id=\"fn-");
                         AppendEncoded(html, index);
-                        html.Append("\">");
+                        html.Append("\"");
+                        AppendNodeAttributes(node, html);
+                        html.Append('>');
 
-                        RenderFootnoteChildren(node, html, diagnostics);
+                        RenderTightContainerChildren(node, html, diagnostics);
 
                         html.Append(" <a class=\"footnote-backref\" href=\"#fnref-");
                         AppendEncoded(html, index);
                         html.Append("\" data-footnote-target=\"fnref-");
                         AppendEncoded(html, index);
-                        html.Append("\" aria-label=\"返回正文中的脚注引用 ");
-                        AppendEncoded(html, index);
-                        html.Append("\">↩</a>");
-
-                        html.Append("</li>");
+                        html.Append("\" aria-label=\"返回正文引用\">↩</a></li>");
                         break;
                     }
                 case NodeType.FootnoteLink:
                     {
-                        var index = node.Attributes.TryGetValue("index", out var value)
-                            ? value
-                            : node.Text;
+                        var index = node.Attributes.TryGetValue("index", out var value) ? value : node.Text;
 
-                        html.Append("<sup class=\"footnote-ref\">");
-                        html.Append("<a id=\"fnref-");
+                        html.Append("<sup class=\"footnote-ref\"><a id=\"fnref-");
                         AppendEncoded(html, index);
                         html.Append("\" href=\"#fn-");
                         AppendEncoded(html, index);
                         html.Append("\" data-footnote-target=\"fn-");
-                        AppendEncoded(html, index);
-                        html.Append("\" aria-label=\"跳转到脚注 ");
                         AppendEncoded(html, index);
                         html.Append("\">");
                         AppendEncoded(html, index);
@@ -149,6 +143,7 @@ public sealed class HtmlRenderer : IDocumentRenderer
                 case NodeType.ThematicBreak:
                     html.Append("<hr");
                     AppendNodeAttributes(node, html);
+                    AppendStyle(node, html);
                     html.Append(" />");
                     break;
                 case NodeType.Table:
@@ -178,6 +173,7 @@ public sealed class HtmlRenderer : IDocumentRenderer
                 case NodeType.InlineCode:
                     html.Append("<code");
                     AppendNodeAttributes(node, html);
+                    AppendStyle(node, html);
                     html.Append('>');
                     html.Append(WebUtility.HtmlEncode(node.Text));
                     html.Append("</code>");
@@ -210,10 +206,7 @@ public sealed class HtmlRenderer : IDocumentRenderer
         }
     }
 
-    private void RenderTableCell(
-        MarkdownNode node,
-        StringBuilder html,
-        List<DiagnosticMessage> diagnostics)
+    private void RenderTableCell(MarkdownNode node, StringBuilder html, List<DiagnosticMessage> diagnostics)
     {
         var tag = node.IsTableHeader ? "th" : "td";
 
@@ -222,19 +215,7 @@ public sealed class HtmlRenderer : IDocumentRenderer
         AppendStyle(node, html);
         html.Append('>');
 
-        for (int i = 0; i < node.Children.Count; i++)
-        {
-            var child = node.Children[i];
-
-            if (child.Type == NodeType.Paragraph)
-            {
-                RenderChildren(child, html, diagnostics);
-            }
-            else
-            {
-                RenderNode(child, html, diagnostics);
-            }
-        }
+        RenderTightContainerChildren(node, html, diagnostics);
 
         html.Append("</").Append(tag).Append('>');
     }
@@ -266,7 +247,7 @@ public sealed class HtmlRenderer : IDocumentRenderer
         html.Append("</").Append(tag).Append('>');
     }
 
-    private static void RenderCodeBlock(MarkdownNode node, StringBuilder html)
+    private void RenderCodeBlock(MarkdownNode node, StringBuilder html)
     {
         var code = new StringBuilder();
 
@@ -286,6 +267,7 @@ public sealed class HtmlRenderer : IDocumentRenderer
 
         html.Append("<pre");
         AppendNodeAttributes(node, html);
+        AppendStyle(node, html);
         html.Append("><code");
 
         if (node.Attributes.TryGetValue("language", out var lang) && !string.IsNullOrWhiteSpace(lang))
@@ -298,10 +280,7 @@ public sealed class HtmlRenderer : IDocumentRenderer
         html.Append("</code></pre>");
     }
 
-    private void RenderLink(
-        MarkdownNode node,
-        StringBuilder html,
-        List<DiagnosticMessage> diagnostics)
+    private void RenderLink(MarkdownNode node, StringBuilder html, List<DiagnosticMessage> diagnostics)
     {
         var url = GetAttribute(node, "url") ?? GetAttribute(node, "href");
 
@@ -311,9 +290,7 @@ public sealed class HtmlRenderer : IDocumentRenderer
 
         if (IsSafeUrl(url))
         {
-            html.Append(" href=\"")
-                .Append(WebUtility.HtmlEncode(url!))
-                .Append('"');
+            html.Append(" href=\"").Append(WebUtility.HtmlEncode(url!)).Append('"');
         }
 
         html.Append('>');
@@ -338,13 +315,28 @@ public sealed class HtmlRenderer : IDocumentRenderer
         html.Append("<img");
         AppendNodeAttributes(node, html);
         AppendStyle(node, html);
-        html.Append(" src=\"").Append(WebUtility.HtmlEncode(source)).Append("\" alt=\"").Append(WebUtility.HtmlEncode(node.Text)).Append("\" />");
+        html.Append(" src=\"").Append(WebUtility.HtmlEncode(source!)).Append("\" alt=\"").Append(WebUtility.HtmlEncode(node.Text)).Append("\" />");
     }
 
     private void RenderChildren(MarkdownNode node, StringBuilder html, List<DiagnosticMessage> diagnostics)
     {
         for (int i = 0; i < node.Children.Count; i++)
             RenderNode(node.Children[i], html, diagnostics);
+    }
+
+    private void RenderTightContainerChildren(MarkdownNode node, StringBuilder html, List<DiagnosticMessage> diagnostics)
+    {
+        foreach (var child in node.Children)
+        {
+            if (child.Type == NodeType.Paragraph)
+            {
+                RenderChildren(child, html, diagnostics);
+            }
+            else
+            {
+                RenderNode(child, html, diagnostics);
+            }
+        }
     }
 
     private void AppendStyle(MarkdownNode node, StringBuilder html)
@@ -371,60 +363,18 @@ public sealed class HtmlRenderer : IDocumentRenderer
 
         var trimmed = url.Trim();
 
-        // 严密拦截协议相对链接 "//"
-        if (trimmed.StartsWith("//", StringComparison.Ordinal))
+        if (trimmed.StartsWith("//", StringComparison.Ordinal) || UnsafeUriCharRegex.IsMatch(trimmed))
             return false;
 
-        // 允许相对路径与锚点
-        if (trimmed.StartsWith('#') || trimmed.StartsWith('/') || trimmed.StartsWith("./", StringComparison.Ordinal) || trimmed.StartsWith("../", StringComparison.Ordinal))
+        if (trimmed.StartsWith('#') || trimmed.StartsWith('/') ||
+            trimmed.StartsWith("./", StringComparison.Ordinal) || trimmed.StartsWith("../", StringComparison.Ordinal))
+        {
             return true;
-
-        if (Uri.TryCreate(trimmed, UriKind.Absolute, out var uri))
-        {
-            return AllowedUriSchemes.Contains(uri.Scheme);
         }
 
-        return false;
+        return Uri.TryCreate(trimmed, UriKind.Absolute, out var uri) && AllowedUriSchemes.Contains(uri.Scheme);
     }
 
-    private static void AppendEncoded(StringBuilder html, string value)
-    {
+    private static void AppendEncoded(StringBuilder html, string value) =>
         html.Append(WebUtility.HtmlEncode(value));
-    }
-
-    private void RenderListItemChildren(
-        MarkdownNode node,
-        StringBuilder html,
-        List<DiagnosticMessage> diagnostics)
-    {
-        foreach (var child in node.Children)
-        {
-            if (child.Type == NodeType.Paragraph)
-            {
-                RenderChildren(child, html, diagnostics);
-            }
-            else
-            {
-                RenderNode(child, html, diagnostics);
-            }
-        }
-    }
-
-    private void RenderFootnoteChildren(
-        MarkdownNode node,
-        StringBuilder html,
-        List<DiagnosticMessage> diagnostics)
-    {
-        foreach (var child in node.Children)
-        {
-            if (child.Type == NodeType.Paragraph)
-            {
-                RenderChildren(child, html, diagnostics);
-            }
-            else
-            {
-                RenderNode(child, html, diagnostics);
-            }
-        }
-    }
 }
