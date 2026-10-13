@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Globalization;
 using System.Linq;
 using System.Xml.Linq;
@@ -87,8 +87,12 @@ internal static class DocumentXmlWriter
                         : null);
                 AddIfDouble("LineHeight", node.LocalStyle.LineHeight);
                 AddIf("TextAlign", node.LocalStyle.TextAlign);
+                AddIf("VerticalAlign", node.LocalStyle.VerticalAlign);
                 AddIf("BorderColor", node.LocalStyle.BorderColor);
                 AddIfDouble("BorderWidth", node.LocalStyle.BorderWidth);
+                AddIfDouble("BorderRadius", node.LocalStyle.BorderRadius);
+                AddIfDouble("Width", node.LocalStyle.Width);
+                AddIfDouble("Gap", node.LocalStyle.Gap);
                 AddIf("CustomCss", node.LocalStyle.CustomCss);
 
                 if (node.LocalStyle.Margin is not null)
@@ -197,8 +201,12 @@ internal static class DocumentXmlWriter
                         : null);
                 AddIfDouble("LineHeight", style.Style.LineHeight);
                 AddIf("TextAlign", style.Style.TextAlign);
+                AddIf("VerticalAlign", style.Style.VerticalAlign);
                 AddIf("BorderColor", style.Style.BorderColor);
                 AddIfDouble("BorderWidth", style.Style.BorderWidth);
+                AddIfDouble("BorderRadius", style.Style.BorderRadius);
+                AddIfDouble("Width", style.Style.Width);
+                AddIfDouble("Gap", style.Style.Gap);
                 AddIf("CustomCss", style.Style.CustomCss);
 
                 if (style.Style.Margin is not null)

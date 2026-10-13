@@ -28,15 +28,18 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
     private readonly IStyleResolver _styleResolver;
     private readonly ICssStyleBuilder _cssStyleBuilder;
     private readonly AdmonitionIconOptions _iconOptions;
+    private readonly NodeStyle? _defaultStyle;
 
     public HtmlRenderer(
         IStyleResolver styleResolver,
         ICssStyleBuilder? cssStyleBuilder = null,
-        AdmonitionIconOptions? iconOptions = null)
+        AdmonitionIconOptions? iconOptions = null,
+        NodeStyle? defaultStyle = null)
     {
         _styleResolver = styleResolver ?? throw new ArgumentNullException(nameof(styleResolver));
         _cssStyleBuilder = cssStyleBuilder ?? new ExportingCssStyleBuilder();
         _iconOptions = iconOptions ?? new AdmonitionIconOptions();
+        _defaultStyle = defaultStyle;
     }
 
     public RenderResult Render(MarkdownDocument document)
@@ -563,41 +566,58 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
                         break;
                     }
                 case NodeType.FootnoteGroup:
-                    html.Append("<section class=\"footnotes\"><ol>");
+                    html.Append("<section class=\"footnotes\">");
                     RenderChildren(node, html, diagnostics);
-                    html.Append("</ol></section>");
+                    html.Append("</section>");
                     break;
                 case NodeType.Footnote:
                     {
-                        var index = node.Attributes.TryGetValue("index", out var value) ? value : node.Text;
+                        var slug = GetAttribute(node, "slug") ?? node.Text;
+                        var label = GetAttribute(node, "label") ?? slug;
+                        var backrefs = GetAttribute(node, "backrefs") ?? ("fnref-" + slug);
 
-                        html.Append("<li id=\"fn-");
-                        AppendEncoded(html, index);
-                        html.Append("\"");
+                        html.Append("<div class=\"footnote-item\" id=\"fn-").Append(slug).Append('"');
                         AppendNodeAttributes(node, html);
-                        html.Append('>');
+                        AppendStyle(node, html);
+                        html.Append("><span class=\"footnote-index\">");
+                        AppendEncoded(html, label);
+                        html.Append("</span><div class=\"footnote-content\">");
 
                         RenderTightContainerChildren(node, html, diagnostics);
 
-                        html.Append(" <a class=\"footnote-backref\" href=\"#fnref-");
-                        AppendEncoded(html, index);
-                        html.Append("\" data-footnote-target=\"fnref-");
-                        AppendEncoded(html, index);
-                        html.Append("\" aria-label=\"返回正文引用\">↩</a></li>");
+                        var anchors = backrefs.Split(',');
+                        var backRefCount = 0;
+                        for (var anchorIndex = 0; anchorIndex < anchors.Length; anchorIndex++)
+                        {
+                            var anchor = anchors[anchorIndex].Trim();
+                            if (anchor.Length == 0)
+                            {
+                                continue;
+                            }
+
+                            backRefCount++;
+                            html.Append(" <a class=\"footnote-backref\" href=\"#").Append(anchor)
+                                .Append("\" data-footnote-target=\"").Append(anchor)
+                                .Append("\" title=\"返回第").Append(backRefCount)
+                                .Append("处引用\" aria-label=\"返回第").Append(backRefCount)
+                                .Append("处正文引用\"><span class=\"footnote-backref-icon\">↩</span></a>");
+                        }
+
+                        html.Append("</div></div>");
                         break;
                     }
                 case NodeType.FootnoteLink:
                     {
-                        var index = node.Attributes.TryGetValue("index", out var value) ? value : node.Text;
+                        var slug = GetAttribute(node, "slug") ?? node.Text;
+                        var label = GetAttribute(node, "label") ?? slug;
+                        var anchor = GetAttribute(node, "anchor") ?? ("fnref-" + slug);
 
-                        html.Append("<sup class=\"footnote-ref\"><a id=\"fnref-");
-                        AppendEncoded(html, index);
-                        html.Append("\" href=\"#fn-");
-                        AppendEncoded(html, index);
-                        html.Append("\" data-footnote-target=\"fn-");
-                        AppendEncoded(html, index);
-                        html.Append("\">");
-                        AppendEncoded(html, index);
+                        html.Append("<sup class=\"footnote-ref\"><a id=\"").Append(anchor)
+                            .Append("\" href=\"#fn-").Append(slug)
+                            .Append("\" data-footnote-target=\"fn-").Append(slug).Append('"');
+                        AppendStyle(node, html);
+                        html.Append(">");
+                        AppendEncoded(html, label);
                         html.Append("</a></sup>");
                         break;
                     }
@@ -622,7 +642,20 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
                     break;
                 case NodeType.Mermaid:
                     RenderMermaid(node, html);
-                    break;
+                    return;
+
+                case NodeType.ImageMatrix:
+                    RenderImageMatrix(node, html);
+                    return;
+
+                case NodeType.QrCode:
+                    RenderQrCode(node, html);
+                    return;
+
+                case NodeType.PoemBlock:
+                    RenderPoemBlock(node, html);
+                    return;
+
                 case NodeType.Custom:
                     RenderCustomBlock(node, html, diagnostics);
                     break;
@@ -633,16 +666,16 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
                     html.Append(" />");
                     break;
                 case NodeType.Table:
-                    RenderBlock(node, "table", html, diagnostics);
+                    RenderTable(node, html, diagnostics);
                     break;
                 case NodeType.TableRow:
-                    RenderBlock(node, "tr", html, diagnostics);
+                    RenderTableRow(node, html, diagnostics);
                     break;
                 case NodeType.TableCell:
                     RenderTableCell(node, html, diagnostics);
                     break;
                 case NodeType.Text:
-                    html.Append(WebUtility.HtmlEncode(node.Text));
+                    RenderText(node, html);
                     break;
                 case NodeType.LineBreak:
                     html.Append("<br />");
@@ -655,6 +688,19 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
                     break;
                 case NodeType.Delete:
                     RenderInline(node, "del", html, diagnostics);
+                    break;
+                // EmphasisExtras：下标/上标/插入/标记
+                case NodeType.Subscript:
+                    RenderInline(node, "sub", html, diagnostics);
+                    break;
+                case NodeType.Superscript:
+                    RenderInline(node, "sup", html, diagnostics);
+                    break;
+                case NodeType.Inserted:
+                    RenderInline(node, "ins", html, diagnostics);
+                    break;
+                case NodeType.Marked:
+                    RenderInline(node, "mark", html, diagnostics);
                     break;
                 case NodeType.InlineCode:
                     html.Append("<code");
@@ -706,6 +752,36 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         html.Append("</").Append(tag).Append('>');
     }
 
+    private void RenderTable(MarkdownNode node, StringBuilder html, List<DiagnosticMessage> diagnostics)
+    {
+        html.Append("<table");
+        AppendNodeAttributes(node, html);
+        AppendStyle(node, html);
+        html.Append('>');
+        RenderChildren(node, html, diagnostics);
+        html.Append("</table>");
+    }
+
+    private void RenderTableRow(MarkdownNode node, StringBuilder html, List<DiagnosticMessage> diagnostics)
+    {
+        html.Append("<tr");
+        AppendNodeAttributes(node, html);
+        // tr 的背景会被 th/td 自带的表头底/斑马纹遮盖：改写为 --row-bg
+        // 变量，由预览 CSS 在单元格上消费。
+        AppendStyle(node, html, BuildTableRowCascadeVars(node));
+        html.Append('>');
+        RenderChildren(node, html, diagnostics);
+        html.Append("</tr>");
+    }
+
+    private string? BuildTableRowCascadeVars(MarkdownNode node)
+    {
+        var resolved = _styleResolver.Resolve(node);
+
+        var bg = resolved.BackgroundColor?.Trim();
+        return string.IsNullOrWhiteSpace(bg) ? null : "--row-bg: " + bg + ';';
+    }
+
     private void RenderBlock(MarkdownNode node, string tag, StringBuilder html, List<DiagnosticMessage> diagnostics)
     {
         html.Append('<').Append(tag);
@@ -732,14 +808,17 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
                 ? titleValue.Trim()
                 : AdmonitionCatalog.GetDefaultTitle(safeKind);
 
+        var icon = TryBuildIconGlyph(node.Attributes.GetValueOrDefault(MarkdownAttributes.Icon))
+            ?? _iconOptions.GetAdmonitionIcon(safeKind);
+
         html.Append("<blockquote class=\"admonition ")
             .Append(safeKind)
             .Append('"');
         AppendNodeAttributes(node, html);
-        AppendStyle(node, html);
+        AppendStyle(node, html, ResolveSemanticAccentCss(node, "--adm-accent"));
         html.Append("><p class=\"admonition-title\">")
             .Append("<span class=\"admonition-icon\"><span class=\"md-icon\" aria-hidden=\"true\">")
-            .Append(_iconOptions.GetIcon(safeKind))
+            .Append(icon)
             .Append("</span></span>")
             .Append("<span class=\"admonition-title-text\">")
             .Append(WebUtility.HtmlEncode(title))
@@ -760,13 +839,16 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
                 ? kindValue
                 : AdmonitionCatalog.DefaultCustomBlockKind;
 
+        var icon = TryBuildIconGlyph(node.Attributes.GetValueOrDefault(MarkdownAttributes.Icon))
+            ?? _iconOptions.GetCustomBlockIcon(kind);
+
         html.Append("<div class=\"custom-block custom-")
             .Append(kind)
             .Append('"');
         AppendNodeAttributes(node, html);
-        AppendStyle(node, html);
+        AppendStyle(node, html, ResolveSemanticAccentCss(node, "--cb-accent"));
         html.Append("><span class=\"custom-block-icon\"><span class=\"md-icon\" aria-hidden=\"true\">")
-            .Append(_iconOptions.GetIcon(kind))
+            .Append(icon)
             .Append("</span></span><div class=\"custom-block-body\">");
 
         RenderChildren(node, html, diagnostics);
@@ -843,12 +925,83 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
             .Append(isBlock ? "math-block" : "math-inline")
             .Append('"');
         AppendNodeAttributes(node, html);
-        AppendStyle(node, html);
+        // 块公式经 KaTeX 渲染后内部 .katex-display/.katex 自带对齐与字体，
+        // 直接属性无法靠继承穿透；改写为 CSS 变量由预览专属规则消费。
+        AppendStyle(node, html, isBlock ? BuildMathStyleVars(node) : null);
         html.Append(" data-tex=\"")
             .Append(WebUtility.HtmlEncode(formula))
             .Append("\">")
             .Append(WebUtility.HtmlEncode(formula))
             .Append("</").Append(tag).Append('>');
+    }
+
+    /// <summary>
+    /// KaTeX 注入的 .katex 元素自带 font-family/text-align，容器直接属性无法继承穿透；
+    /// 用户设置改写为 --math-* 变量由预览 CSS 消费，未设置时回退 KaTeX 默认。
+    /// </summary>
+    private string? BuildMathStyleVars(MarkdownNode node)
+    {
+        var resolved = _styleResolver.Resolve(node);
+        StringBuilder? vars = null;
+
+        var align = resolved.TextAlign?.Trim().ToLowerInvariant();
+        if (align is "left" or "right" or "center")
+        {
+            vars = new StringBuilder();
+            vars.Append("--math-align: ").Append(align).Append(';');
+        }
+
+        // KaTeX 暗色主题规则（html[data-theme="dark"] .katex）特异性高于
+        // 普通 .katex 取色规则，会顶掉继承下来的 --node-color；显式色
+        // 改写为 --math-color 由 .math-block 专属规则消费。
+        var color = resolved.ForegroundColor?.Trim();
+        // 与 PreviewCssStyleBuilder 的基线剥离保持一致：生效值等于文档默认
+        // 文字色（#333333 等）时只是默认基线而非用户显式设置，不输出变量，
+        // 否则暗色主题下公式被默认深灰锁死（灰底灰字）。
+        var defaultColor = _defaultStyle?.ForegroundColor?.Trim();
+        if (!string.IsNullOrWhiteSpace(color) && !SameHexColor(color, defaultColor))
+        {
+            vars ??= new StringBuilder();
+            vars.Append("--math-color: ").Append(color).Append(';');
+        }
+
+        var fontFamily = resolved.FontFamily?.Trim();
+        // 与 PreviewCssStyleBuilder 的基线剥离保持一致：生效值等于文档默认
+        // 字体（Arial 等）时视为用户未显式设置，不输出变量，交由 KaTeX 默认。
+        var defaultFontFamily = _defaultStyle?.FontFamily?.Trim();
+        if (!string.IsNullOrWhiteSpace(fontFamily)
+            && !string.Equals(fontFamily, defaultFontFamily, StringComparison.OrdinalIgnoreCase))
+        {
+            vars ??= new StringBuilder();
+            vars.Append("--math-font-family: ")
+                .Append(fontFamily)
+                .Append(';');
+        }
+
+        return vars?.ToString();
+    }
+
+    // 颜色字面量等价比较：#abc 展开为 #aabbcc，与 PreviewCssStyleBuilder
+    // 的归一化规则一致。任一为空视为不等。
+    private static bool SameHexColor(string? a, string? b)
+    {
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b))
+        {
+            return false;
+        }
+
+        return string.Equals(NormalizeHexColor(a), NormalizeHexColor(b), StringComparison.Ordinal);
+    }
+
+    private static string NormalizeHexColor(string color)
+    {
+        var c = color.Trim().ToLowerInvariant();
+        if (c.Length == 4 && c[0] == '#')
+        {
+            c = "#" + c[1] + c[1] + c[2] + c[2] + c[3] + c[3];
+        }
+
+        return c;
     }
 
     private void RenderMermaid(MarkdownNode node, StringBuilder html)
@@ -862,12 +1015,431 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         }
         html.Append('"');
         AppendNodeAttributes(node, html);
-        AppendStyle(node, html);
+        AppendStyle(node, html, ResolveReplacedAlignmentCss(node, forceBlockDisplay: false));
         html.Append(" data-diagram=\"")
             .Append(WebUtility.HtmlEncode(source))
             .Append("\">")
             .Append(WebUtility.HtmlEncode(source))
             .Append("</div>");
+    }
+
+    private void RenderImageMatrix(MarkdownNode node, StringBuilder html)
+    {
+        var source = node.Text ?? string.Empty;
+        var lines = source.Replace("\r\n", "\n").Split('\n');
+
+        // 先按行收集格子，并统计“单行为最多图片数” N。图片格宽度恒按 N 等分；
+        // 文本格只以 auto 宽度吸收剩余空间（必要时自动折行），绝不挤压图片尺寸。
+        var rows = new List<List<string>>();
+        var currentRow = new List<string>();
+
+        foreach (var raw in lines)
+        {
+            var trimmed = raw.Trim();
+            if (trimmed.Length == 0)
+            {
+                if (currentRow.Count > 0)
+                {
+                    rows.Add(currentRow);
+                    currentRow = new List<string>();
+                }
+
+                continue;
+            }
+
+            // 围栏开/关标记行（'''image、''' 等）不是内容格，必须跳过。
+            if (trimmed.StartsWith("'''", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            currentRow.AddRange(SplitMatrixCells(trimmed));
+        }
+
+        if (currentRow.Count > 0)
+        {
+            rows.Add(currentRow);
+        }
+
+        var columnCount = 1;
+        foreach (var row in rows)
+        {
+            var imageCount = 0;
+            foreach (var cell in row)
+            {
+                if (IsSafeUrl(cell))
+                {
+                    imageCount++;
+                }
+            }
+
+            if (imageCount > columnCount)
+            {
+                columnCount = imageCount;
+            }
+        }
+
+        html.Append("<div class=\"image-matrix");
+        if (node.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
+        {
+            html.Append(" image-matrix-pending");
+        }
+        html.Append('"');
+        AppendNodeAttributes(node, html);
+
+        // 格间距与对齐经自定义变量/单边外边距注入：--matrix-gap 贯通外层、行与图片格基准，
+        // 对齐对替换型容器走 auto 外边距（见 BuildReplacedAlignment）。
+        var matrixResolved = _styleResolver.Resolve(node);
+        var matrixExtra = new StringBuilder($"--matrix-cols:{columnCount}");
+        if (matrixResolved.Gap is > 0)
+        {
+            matrixExtra.Append("; --matrix-gap:")
+                .Append(matrixResolved.Gap.Value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture))
+                .Append("px");
+        }
+        var matrixAlign = BuildReplacedAlignment(matrixResolved.TextAlign, forceBlockDisplay: false);
+        if (!string.IsNullOrEmpty(matrixAlign))
+            matrixExtra.Append("; ").Append(matrixAlign);
+
+        AppendStyle(node, html, matrixExtra.ToString());
+        html.Append('>');
+
+        foreach (var row in rows)
+        {
+            html.Append("<div class=\"image-matrix-row\">");
+            foreach (var cell in row)
+            {
+                AppendMatrixCell(html, cell);
+            }
+
+            html.Append("</div>");
+        }
+
+        html.Append("</div>");
+    }
+
+    private void RenderQrCode(MarkdownNode node, StringBuilder html)
+    {
+        // 块体文本即二维码承载内容（链接 / 任意文本）。
+        var content = (node.Text ?? string.Empty).Trim();
+        var isPending = node.Attributes.ContainsKey(MarkdownAttributes.Unclosed);
+        var isEmpty = content.Length == 0;
+
+        html.Append("<figure class=\"qrcode-block");
+        if (isPending) html.Append(" qrcode-block-pending");
+        if (isEmpty) html.Append(" qrcode-block-empty");
+        html.Append('"');
+        AppendNodeAttributes(node, html);
+        // 替换型块定位走 auto 外边距（基础 CSS 已为块级 flex + fit-content），
+        // text-align 无法移动 figure 本身。
+        AppendStyle(node, html, ResolveReplacedAlignmentCss(node, forceBlockDisplay: false));
+        // 完整内容进 data-tip 由预览 CSS 画主题化气泡（原生 title 样式系统级不可控）。
+        if (!isEmpty)
+            html.Append(" data-tip=\"").Append(WebUtility.HtmlEncode(content)).Append('"');
+        html.Append('>');
+
+        if (isEmpty)
+        {
+            html.Append("<div class=\"qrcode-placeholder\">")
+                .Append("<span class=\"qrcode-placeholder-icon\" aria-hidden=\"true\">&#9638;</span>")
+                .Append("<span>在围栏内输入二维码内容（链接或文本）</span>")
+                .Append("</div>");
+        }
+        else
+        {
+            try
+            {
+                node.Attributes.TryGetValue("qr-ecc", out var eccValue);
+                node.Attributes.TryGetValue("qr-border", out var borderValue);
+
+                var ecc = ResolveQrEcc(eccValue);
+                var border = ResolveQrBorder(borderValue);
+
+                // 必须关闭 ECC 提升（boostEcl）：默认会把等级向上提升，
+                // 短内容选 L/M/Q 最终都被提升到 Q。关闭后严格按所选等级编码。
+                var qr = Net.Codecrete.QrCodeGenerator.QrCode.EncodeTextAdvanced(
+                    content,
+                    ecc,
+                    boostEcl: false,
+                    minVersion: 1,
+                    maxVersion: 40,
+                    eci: Net.Codecrete.QrCodeGenerator.ECI.Automatic,
+                    encoding: null,
+                    kanjiStrategy: Net.Codecrete.QrCodeGenerator.KanjiStrategy.Automatic,
+                    encodingInfo: null);
+
+                var svg = qr.ToSvgString(border, "currentColor", "transparent");
+
+                // 去掉 ToSvgString 自带的 <?xml?> 声明与 <!DOCTYPE>，
+                // 只保留 <svg>…</svg> 以便内联嵌入。
+                var svgStart = svg.IndexOf("<svg", StringComparison.Ordinal);
+                if (svgStart > 0)
+                    svg = svg.Substring(svgStart);
+
+                html.Append("<div class=\"qrcode-svg\">")
+                    .Append(svg)
+                    .Append("</div>")
+                    // 显示文本由 CSS 两行截断，超长链接不会在卡片下堆成高文字块。
+                    .Append("<figcaption>")
+                    .Append(WebUtility.HtmlEncode(content))
+                    .Append("</figcaption>");
+            }
+            catch (Net.Codecrete.QrCodeGenerator.DataTooLongException)
+            {
+                html.Append("<div class=\"qrcode-error\" role=\"alert\">")
+                    .Append("内容过长，无法生成二维码，请缩短内容")
+                    .Append("</div>");
+            }
+        }
+
+        html.Append("</figure>");
+    }
+
+    private static Net.Codecrete.QrCodeGenerator.QrCode.Ecc ResolveQrEcc(string? value) =>
+        value switch
+        {
+            "L" => Net.Codecrete.QrCodeGenerator.QrCode.Ecc.Low,
+            "Q" => Net.Codecrete.QrCodeGenerator.QrCode.Ecc.Quartile,
+            "H" => Net.Codecrete.QrCodeGenerator.QrCode.Ecc.High,
+            _ => Net.Codecrete.QrCodeGenerator.QrCode.Ecc.Medium
+        };
+
+    private static int ResolveQrBorder(string? value) =>
+        int.TryParse(value, out var modules) && modules is >= 0 and <= 10
+            ? modules
+            : 2;
+
+    /// <summary>
+    /// 拆分图片矩阵一行中的格子。以空白分隔，但双引号内的空格不参与分隔，
+    /// 因此 <c>T:"山居 秋暝"</c> 这样的含空格文本可作为单个文本格。
+    /// 引号本身不作为内容保留。
+    /// </summary>
+    private static List<string> SplitMatrixCells(string line)
+    {
+        var cells = new List<string>();
+        var builder = new StringBuilder();
+        var inCell = false;
+        var inQuote = false;
+
+        foreach (var ch in line)
+        {
+            if (inQuote)
+            {
+                if (ch == '"')
+                {
+                    inQuote = false;
+                }
+                else
+                {
+                    builder.Append(ch);
+                }
+
+                continue;
+            }
+
+            if (ch == '"')
+            {
+                inQuote = true;
+                inCell = true;
+                continue;
+            }
+
+            if (ch == ' ' || ch == '\t')
+            {
+                if (inCell)
+                {
+                    cells.Add(builder.ToString());
+                    builder.Clear();
+                    inCell = false;
+                }
+
+                continue;
+            }
+
+            builder.Append(ch);
+            inCell = true;
+        }
+
+        // 引号未闭合时也保留已读取的内容。
+        if (inCell)
+        {
+            cells.Add(builder.ToString());
+        }
+
+        return cells;
+    }
+
+    /// <summary>
+    /// 输出图片矩阵中的一个格子：
+    /// 显式 <c>T:文字</c>（含空文本占位）或普通纯文本渲染为文本格，
+    /// 安全 URL 渲染为图片格；合法但 scheme 不被允许的 URI（如 javascript:）直接忽略。
+    /// </summary>
+    private static void AppendMatrixCell(
+        StringBuilder html,
+        string token)
+    {
+        string? text;
+
+        if (token.StartsWith("T:", StringComparison.OrdinalIgnoreCase))
+        {
+            // 显式文本标记，冒号后即文本内容（引号已在拆分阶段去除）。
+            text = token.Substring(2);
+        }
+        else if (IsSafeUrl(token))
+        {
+            html.Append("<figure class=\"image-matrix-cell image-matrix-cell-image\"><img src=\"")
+                .Append(WebUtility.HtmlEncode(token))
+                .Append("\" loading=\"lazy\" alt=\"\" /></figure>");
+            return;
+        }
+        else if (Uri.TryCreate(token, UriKind.Absolute, out _))
+        {
+            // 形如绝对 URI 但 scheme 不在允许名单（javascript:/data:/vbscript: 等），
+            // 既不作为图片也不作为文本，直接丢弃，防止危险内容注入。
+            return;
+        }
+        else
+        {
+            // 非 URI 的普通文字，兼容为文本格。
+            text = token;
+        }
+
+        var isEmpty = string.IsNullOrWhiteSpace(text);
+
+        html.Append(
+            "<figure class=\"image-matrix-cell image-matrix-text\"><div class=\"image-matrix-text-inner");
+
+        if (isEmpty)
+        {
+            html.Append(" image-matrix-text-empty");
+        }
+
+        html.Append("\">");
+
+        // 零宽空格保证空文本格仍占据与图片一致的 4:3 盒高度，不塌陷。
+        html.Append(
+            isEmpty
+                ? "&#8203;"
+                : WebUtility.HtmlEncode(text));
+
+        html.Append("</div></figure>");
+    }
+
+    private void RenderPoemBlock(MarkdownNode node, StringBuilder html)
+    {
+        // 子部件由转换器解析为虚拟节点，这里按固定布局遍历，
+        // 并把各自 LocalStyle 落到对应元素（无样式时 AppendStyle 输出空）。
+        var titleNode = node.Children.FirstOrDefault(c => c.Type == NodeType.PoemTitle);
+        var authorNode = node.Children.FirstOrDefault(c => c.Type == NodeType.PoemAuthor);
+        var dynastyNode = node.Children.FirstOrDefault(c => c.Type == NodeType.PoemDynasty);
+        var formNode = node.Children.FirstOrDefault(c => c.Type == NodeType.PoemForm);
+        var sourceNode = node.Children.FirstOrDefault(c => c.Type == NodeType.PoemSource);
+        var noteNode = node.Children.FirstOrDefault(c => c.Type == NodeType.PoemNote);
+        var stanzas = node.Children.Where(c => c.Type == NodeType.PoemStanza).ToList();
+
+        html.Append("<div class=\"poem-block");
+        if (node.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
+        {
+            html.Append(" poem-pending");
+        }
+        html.Append("\"");
+        AppendNodeAttributes(node, html);
+        AppendStyle(node, html);
+        html.Append('>');
+
+        if (titleNode is not null || authorNode is not null
+            || dynastyNode is not null || formNode is not null)
+        {
+            html.Append("<div class=\"poem-header\">");
+
+            if (titleNode is not null)
+            {
+                html.Append("<h3 class=\"poem-title\"");
+                AppendStyle(titleNode, html);
+                html.Append('>')
+                    .Append(WebUtility.HtmlEncode(titleNode.Text))
+                    .Append("</h3>");
+            }
+
+            if (authorNode is not null || dynastyNode is not null)
+            {
+                html.Append("<div class=\"poem-author-line\">");
+                if (authorNode is not null)
+                {
+                    html.Append("<span class=\"poem-author\"");
+                    AppendStyle(authorNode, html);
+                    html.Append('>')
+                        .Append(WebUtility.HtmlEncode(authorNode.Text))
+                        .Append("</span>");
+                }
+                if (dynastyNode is not null)
+                {
+                    html.Append("<span class=\"poem-dynasty\"");
+                    AppendStyle(dynastyNode, html);
+                    html.Append('>')
+                        .Append(WebUtility.HtmlEncode(dynastyNode.Text))
+                        .Append("</span>");
+                }
+                html.Append("</div>");
+            }
+
+            if (formNode is not null)
+            {
+                html.Append("<div class=\"poem-form\"");
+                AppendStyle(formNode, html);
+                html.Append('>')
+                    .Append(WebUtility.HtmlEncode(formNode.Text))
+                    .Append("</div>");
+            }
+
+            html.Append("</div>");
+        }
+
+        html.Append("<div class=\"poem-body\">");
+        foreach (var stanza in stanzas)
+        {
+            html.Append("<div class=\"poem-stanza\"");
+            AppendStyle(stanza, html);
+            html.Append('>');
+
+            foreach (var line in stanza.Children.Where(c => c.Type == NodeType.PoemLine))
+            {
+                html.Append("<p class=\"poem-line\"");
+                AppendStyle(line, html);
+                html.Append('>')
+                    .Append(WebUtility.HtmlEncode(line.Text))
+                    .Append("</p>");
+            }
+
+            html.Append("</div>");
+        }
+        html.Append("</div>");
+
+        if (sourceNode is not null)
+        {
+            html.Append("<div class=\"poem-source\"");
+            AppendStyle(sourceNode, html);
+            html.Append('>')
+                .Append(WebUtility.HtmlEncode(sourceNode.Text))
+                .Append("</div>");
+        }
+
+        // 出处与说明均为 inline-block，共存时用 br 断行避免并排
+        if (sourceNode is not null && noteNode is not null)
+        {
+            html.Append("<br class=\"poem-meta-break\"/>");
+        }
+
+        if (noteNode is not null)
+        {
+            html.Append("<div class=\"poem-note\"");
+            AppendStyle(noteNode, html);
+            html.Append('>')
+                .Append(WebUtility.HtmlEncode(noteNode.Text))
+                .Append("</div>");
+        }
+
+        html.Append("</div>");
     }
 
     private void RenderLink(MarkdownNode node, StringBuilder html, List<DiagnosticMessage> diagnostics)
@@ -904,8 +1476,8 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
 
         html.Append("<img");
         AppendNodeAttributes(node, html);
-        AppendStyle(node, html);
-        html.Append(" src=\"").Append(WebUtility.HtmlEncode(source!)).Append("\" alt=\"").Append(WebUtility.HtmlEncode(node.Text)).Append("\" />");
+        AppendStyle(node, html, ResolveReplacedAlignmentCss(node, forceBlockDisplay: true));
+        html.Append(" src=\"").Append(WebUtility.HtmlEncode(source!)).Append("\" loading=\"lazy\" alt=\"").Append(WebUtility.HtmlEncode(node.Text)).Append("\" />");
     }
 
     private void RenderChildren(MarkdownNode node, StringBuilder html, List<DiagnosticMessage> diagnostics)
@@ -929,21 +1501,96 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         }
     }
 
-    private void AppendStyle(MarkdownNode node, StringBuilder html)
+    private void AppendStyle(MarkdownNode node, StringBuilder html, string? extraCss = null)
     {
         var style = _styleResolver.Resolve(node);
         var css = _cssStyleBuilder.Build(style);
+        if (!string.IsNullOrWhiteSpace(extraCss))
+        {
+            css = string.IsNullOrWhiteSpace(css) ? extraCss.Trim() : css + " " + extraCss.Trim();
+        }
         if (!string.IsNullOrWhiteSpace(css))
         {
             html.Append(" style=\"").Append(WebUtility.HtmlEncode(css)).Append('"');
         }
     }
 
+    private string? ResolveReplacedAlignmentCss(MarkdownNode node, bool forceBlockDisplay)
+    {
+        var resolved = _styleResolver.Resolve(node);
+        return BuildReplacedAlignment(resolved.TextAlign, forceBlockDisplay);
+    }
+
+    /// <summary>
+    /// 替换型内容（图片 / Mermaid / 公式块 / 图片矩阵）无法用 text-align 定位，
+    /// 改为写水平 auto 外边距；图片默认行内级，必须先 display:block 才生效。
+    /// 片段经 extraCss 追加在主样式之后，单边 longhand 仅覆盖左右、保留显式上下外边距。
+    /// </summary>
+    private static string? BuildReplacedAlignment(string? textAlign, bool forceBlockDisplay)
+    {
+        if (string.IsNullOrWhiteSpace(textAlign))
+            return null;
+
+        var prefix = forceBlockDisplay ? "display:block; " : string.Empty;
+
+        return textAlign.Trim().ToLowerInvariant() switch
+        {
+            "center" => prefix + "margin-left:auto;margin-right:auto",
+            "left" => prefix + "margin-left:0;margin-right:auto",
+            "right" => prefix + "margin-left:auto;margin-right:0",
+            _ => null
+        };
+    }
+
+    /// <summary>
+    /// 渲染链判定：提示块/自定义引用块默认按 kind 用语义色驱动左边条、图标与标题；
+    /// 仅当用户（或样式表）显式定义了边框色时，把同色写入语义变量，让细条、图标、
+    /// 标题与用户边框保持同色；只改背景色时语义色仍按 kind 保留。
+    /// </summary>
+    private string? ResolveSemanticAccentCss(MarkdownNode node, string variableName)
+    {
+        var style = _styleResolver.Resolve(node);
+        if (style is null || string.IsNullOrWhiteSpace(style.BorderColor))
+        {
+            return null;
+        }
+
+        return variableName + ": " + style.BorderColor.Trim() + ";";
+    }
+
+    /// <summary>
+    /// 纯文本节点默认直接输出转义文本；文本运行带局部样式（或继承到非空样式）时
+    /// 必须包一层带样式的 span，否则样式在预览中不可见。
+    /// </summary>
+    private void RenderText(MarkdownNode node, StringBuilder html)
+    {
+        var style = _styleResolver.Resolve(node);
+        var css = _cssStyleBuilder.Build(style);
+
+        if (string.IsNullOrWhiteSpace(css))
+        {
+            html.Append(WebUtility.HtmlEncode(node.Text));
+            return;
+        }
+
+        html.Append("<span");
+        AppendNodeAttributes(node, html);
+        html.Append(" style=\"").Append(WebUtility.HtmlEncode(css)).Append("\">");
+        html.Append(WebUtility.HtmlEncode(node.Text));
+        html.Append("</span>");
+    }
+
     private static void AppendNodeAttributes(MarkdownNode node, StringBuilder html)
     {
         html.Append(" data-node-id=\"").Append(WebUtility.HtmlEncode(node.Id)).Append('"');
 
-        // 流式半截块：前端据此跳过高亮/mermaid/公式渲染，闭合后该属性随新 HTML 消失。
+        if (node.Range.StartLine > 0)
+        {
+            html.Append(" data-line-start=\"").Append(node.Range.StartLine).Append('"');
+            html.Append(" data-line-end=\"")
+                .Append(Math.Max(node.Range.StartLine, node.Range.EndLine)).Append('"');
+        }
+
         if (node.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
         {
             html.Append(" data-block-unclosed=\"1\"");
@@ -952,6 +1599,27 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
 
     private static string? GetAttribute(MarkdownNode node, string name) =>
         node.Attributes.TryGetValue(name, out var val) && !string.IsNullOrWhiteSpace(val) ? val : null;
+
+    /// <summary>
+    /// 属性面板写入的自定义图标为 4~6 位十六进制 Unicode 码点；
+    /// 校验通过才输出，非法值回退到 kind 默认图标，避免破坏 HTML。
+    /// </summary>
+    private static string? TryBuildIconGlyph(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return null;
+
+        var hex = raw.Trim();
+        if (hex.Length is < 4 or > 6
+            || !int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var codePoint)
+            || codePoint is < 0x20 or > 0x10FFFF
+            || (codePoint >= 0xD800 && codePoint <= 0xDFFF))
+        {
+            return null;
+        }
+
+        return $"&#x{hex.ToLowerInvariant()};";
+    }
 
     private static bool IsSafeUrl(string? url)
     {

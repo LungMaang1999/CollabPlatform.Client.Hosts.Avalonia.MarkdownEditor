@@ -83,7 +83,7 @@ internal static class FenceStateScanner
             spaces++;
         }
 
-        if (i >= end || (line[i] != '`' && line[i] != '~'))
+        if (i >= end || (line[i] != '`' && line[i] != '~' && line[i] != '\''))
         {
             return false;
         }
@@ -99,6 +99,15 @@ internal static class FenceStateScanner
         if (fenceLength < 3)
         {
             return false;
+        }
+
+        if (fenceChar == '\'')
+        {
+            var rest = line.Substring(i, end - i).TrimStart();
+            if (!IsCustomFenceKeyword(rest))
+            {
+                return false;
+            }
         }
 
         // 反引号围栏的 info string 不允许再含反引号（Markdig 规则），
@@ -159,5 +168,30 @@ internal static class FenceStateScanner
         }
 
         return true;
+    }
+
+    private static bool IsCustomFenceKeyword(string text)
+    {
+        var keywords = new[]
+        {
+            "ancient-poetry", "ancient-poem",
+            "poetry", "poem", "verse",
+            "shi", "ci", "qu",
+            "image", "img"
+        };
+
+        foreach (var kw in keywords)
+        {
+            if (text.StartsWith(kw, StringComparison.OrdinalIgnoreCase))
+            {
+                var next = kw.Length < text.Length ? text[kw.Length] : '\0';
+                if (next == '\0' || char.IsWhiteSpace(next))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 }

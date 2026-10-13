@@ -45,6 +45,9 @@ public sealed class MarkdownParser : IMarkdownParser
             pipelineBuilder.BlockParsers.Insert(0, new LatexBlockMathParser());
         }
 
+        pipelineBuilder.BlockParsers.Insert(0, new ImageMatrixFenceParser());
+        pipelineBuilder.BlockParsers.Insert(0, new PoemFenceParser());
+
         _pipeline = pipelineBuilder.Build();
     }
 
@@ -158,10 +161,8 @@ public sealed class MarkdownParser : IMarkdownParser
             cutBlockIndex = previousBlocks.Count - 1;
         }
 
-        // 从受影响块向前回退寻找“密封边界”：探测解析的首块与锚点类型/
-        // RawMarkdown 一致时，锚点前方前缀可安全复用；否则追加内容与锚点
-        // 发生了回溯性合并（*** 并入段落、setext 标题、列表懒延续等），
-        // 继续向前扩大重解析区。
+        // 从受影响块向前回退寻找“密封边界”：探测首块与锚点类型/RawMarkdown
+        // 一致则前方前缀可安全复用；否则追加与锚点发生回溯性合并，继续扩大重解析区。
         const int maxWalkBack = 8;
         var lowest = Math.Max(1, cutBlockIndex - maxWalkBack + 1);
 
@@ -286,10 +287,9 @@ public sealed class MarkdownParser : IMarkdownParser
     }
 
     /// <summary>
-    /// 严格追加的“尾部 Section 拼接”：复用锚点 Section 链之前的 Section/块
-    /// 对象（构建期不覆写共享节点 Parent，见 MarkdownNode.PendingParentLinks），
-    /// 探测块挂到复制出的 Section 外壳，身份匹配只在各层尾部子序列间进行。
-    /// 结构前提不成立返回 false 走全量路径。
+    /// 严格追加的“尾部 Section 拼接”：复用锚点 Section 链之前的对象（共享节点
+    /// Parent 延迟切换，见 MarkdownNode.PendingParentLinks），探测块挂到复制的
+    /// Section 外壳，身份匹配只在各层尾部子序列间进行。结构不成立返回 false。
     /// </summary>
     private bool TrySpliceAppendedTail(
         string source,
@@ -472,9 +472,9 @@ public sealed class MarkdownParser : IMarkdownParser
     }
 
     /// <summary>
-    /// 中间编辑（插入/删除/替换）的增量解析：公共前缀块复用，改动区间内顶层
-    /// 块重解析，后缀块复用或深克隆后平移 Range；区间两侧做密封探测，不密封
-    /// 则把相邻块纳入重解析（最多各扩 8 块）。不确定场景返回 false 走全量。
+    /// 中间编辑（插入/删除/替换）的增量解析：前缀块复用，改动区间顶层块重解析，
+    /// 后缀块复用或深克隆平移 Range；两侧做密封探测，不密封则扩区（最多各 8 块）。
+    /// 不确定场景返回 false 走全量。
     /// </summary>
     private bool TryParseModifiedRegion(
         string source,
@@ -602,7 +602,7 @@ public sealed class MarkdownParser : IMarkdownParser
         // 未闭合围栏一路吃到 EOF，其后任何编辑都可能改变跨度，直接全量。
         foreach (var block in oldBlocks)
         {
-            if (block.Type == NodeType.CodeBlock
+            if ((block.Type == NodeType.CodeBlock || block.Type == NodeType.ImageMatrix || block.Type == NodeType.PoemBlock)
                 && block.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
             {
                 return false;

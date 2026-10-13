@@ -31,7 +31,7 @@ public sealed class HtmlRendererFactory : IDocumentRendererFactory
         var styleResolver = new StyleResolver(document, styleCache);
         var defaultStyle = document.StyleSheet.GetOrCreateDefault().Style;
 
-        return new HtmlRenderer(styleResolver, new PreviewCssStyleBuilder(defaultStyle), SharedIconOptions);
+        return new HtmlRenderer(styleResolver, new PreviewCssStyleBuilder(defaultStyle), SharedIconOptions, defaultStyle);
     }
 }
 

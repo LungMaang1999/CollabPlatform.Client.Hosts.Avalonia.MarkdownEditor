@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -66,8 +66,12 @@ internal static class DocumentXmlReader
                         Italic = TryParseBool(valueEl.Element(nsX + "Italic")?.Value),
                         LineHeight = TryParseDouble(valueEl.Element(nsX + "LineHeight")?.Value),
                         TextAlign = valueEl.Element(nsX + "TextAlign")?.Value,
+                        VerticalAlign = valueEl.Element(nsX + "VerticalAlign")?.Value,
                         BorderColor = valueEl.Element(nsX + "BorderColor")?.Value,
                         BorderWidth = TryParseDouble(valueEl.Element(nsX + "BorderWidth")?.Value),
+                        BorderRadius = TryParseDouble(valueEl.Element(nsX + "BorderRadius")?.Value),
+                        Width = TryParseDouble(valueEl.Element(nsX + "Width")?.Value),
+                        Gap = TryParseDouble(valueEl.Element(nsX + "Gap")?.Value),
                         CustomCss = valueEl.Element(nsX + "CustomCss")?.Value
                     };
 
@@ -186,8 +190,12 @@ internal static class DocumentXmlReader
                     Italic = TryParseBool(localStyleEl.Element(nsLocal + "Italic")?.Value),
                     LineHeight = TryParseDouble(localStyleEl.Element(nsLocal + "LineHeight")?.Value),
                     TextAlign = localStyleEl.Element(nsLocal + "TextAlign")?.Value,
+                    VerticalAlign = localStyleEl.Element(nsLocal + "VerticalAlign")?.Value,
                     BorderColor = localStyleEl.Element(nsLocal + "BorderColor")?.Value,
                     BorderWidth = TryParseDouble(localStyleEl.Element(nsLocal + "BorderWidth")?.Value),
+                    BorderRadius = TryParseDouble(localStyleEl.Element(nsLocal + "BorderRadius")?.Value),
+                    Width = TryParseDouble(localStyleEl.Element(nsLocal + "Width")?.Value),
+                    Gap = TryParseDouble(localStyleEl.Element(nsLocal + "Gap")?.Value),
                     CustomCss = localStyleEl.Element(nsLocal + "CustomCss")?.Value
                 };
 

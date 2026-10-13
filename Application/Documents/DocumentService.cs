@@ -24,6 +24,12 @@ public sealed class DocumentService : IDocumentService, IDisposable
     public string? CurrentFilePath => _currentFilePath;
     public bool HasUnsavedChanges => _currentDocument?.IsModified == true;
 
+    public string GetStyleFilePath(string markdownFilePath) =>
+        _fileService.GetStyleFilePath(markdownFilePath);
+
+    public string? FindStyleCompanion(string markdownFilePath) =>
+        _fileService.FindExistingStyleFilePath(markdownFilePath);
+
     public MarkdownDocument NewDocument()
     {
         _gate.Wait();
@@ -44,7 +50,10 @@ public sealed class DocumentService : IDocumentService, IDisposable
         }
     }
 
-    public async Task<MarkdownDocument> OpenAsync(string filePath, CancellationToken cancellationToken = default)
+    public async Task<MarkdownDocument> OpenAsync(string filePath, CancellationToken cancellationToken = default) =>
+        await OpenAsync(filePath, loadStyle: true, cancellationToken).ConfigureAwait(false);
+
+    public async Task<MarkdownDocument> OpenAsync(string filePath, bool loadStyle, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
         var fullPath = Path.GetFullPath(filePath);
@@ -52,13 +61,46 @@ public sealed class DocumentService : IDocumentService, IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var loadResult = await _fileService.LoadAsync(fullPath, cancellationToken).ConfigureAwait(false);
+            var loadResult = await _fileService.LoadAsync(fullPath, loadStyle, cancellationToken).ConfigureAwait(false);
             _currentDocument = loadResult.Document;
             _currentSnapshot = loadResult.Snapshot;
             _currentFilePath = fullPath;
 
             _currentDocument.FilePath = fullPath;
             _currentDocument.MarkSaved();
+
+            CurrentDocumentChanged?.Invoke(this, _currentDocument);
+            HasUnsavedChangesChanged?.Invoke(this, HasUnsavedChanges);
+
+            return _currentDocument;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// 从内存文本载入（浏览器通道）：文档无文件路径、无快照。
+    /// </summary>
+    public Task<MarkdownDocument> OpenFromTextAsync(string markdown, CancellationToken cancellationToken = default) =>
+        OpenFromTextAsync(markdown, styleXml: null, cancellationToken);
+
+    /// <summary>
+    /// 从内存文本载入并附带伴随样式 XML（浏览器多文件选择配对通道）：
+    /// 文档无文件路径、无快照。
+    /// </summary>
+    public async Task<MarkdownDocument> OpenFromTextAsync(string markdown, string? styleXml, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(markdown);
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var loadResult = await Task.Run(() => _fileService.LoadFromText(markdown, styleXml), cancellationToken).ConfigureAwait(false);
+            _currentDocument = loadResult.Document;
+            _currentSnapshot = null;
+            _currentFilePath = null;
 
             CurrentDocumentChanged?.Invoke(this, _currentDocument);
             HasUnsavedChangesChanged?.Invoke(this, HasUnsavedChanges);
@@ -125,6 +167,20 @@ public sealed class DocumentService : IDocumentService, IDisposable
         {
             _gate.Release();
         }
+    }
+
+    /// <summary>
+    /// 浏览器外部保存通道：内容已写入可写流，无文件快照；标记当前文档
+    /// 为已保存并广播状态。
+    /// </summary>
+    public void MarkCurrentSaved()
+    {
+        var doc = _currentDocument
+            ?? throw new InvalidOperationException("No document is currently open.");
+
+        doc.MarkSaved();
+
+        HasUnsavedChangesChanged?.Invoke(this, HasUnsavedChanges);
     }
 
     public async Task<bool> HasExternalChangesAsync(MarkdownDocument document, CancellationToken cancellationToken = default)

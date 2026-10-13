@@ -1,6 +1,7 @@
+using System.Buffers;
+using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Rendering;
 
@@ -17,69 +18,102 @@ public sealed class PreviewPatch
         Ops = ops ?? throw new ArgumentNullException(nameof(ops));
     }
 
-    /// <summary>序列化为送往 WebView 的 JSON 字符串。</summary>
+    /// <summary>
+    /// 序列化为送往 WebView 的 JSON 字符串。
+    /// 直接使用 Utf8JsonWriter 手写固定契约：Browser/WASM 裁剪或 AOT 环境下基于反射的
+    /// JsonSerializer 被禁用（抛 JsonSerializersReflectionDisabled），此热路径不得依赖反射。
+    /// </summary>
     public string ToPayloadJson()
     {
-        var dtoOps = new PayloadOpDto[Ops.Count];
-        for (var i = 0; i < Ops.Count; i++)
+        var buffer = new ArrayBufferWriter<byte>(256);
+        using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions
         {
-            var op = Ops[i];
-            dtoOps[i] = new PayloadOpDto(
-                op.Kind switch
+            // 不转义非 ASCII（中文等），避免补丁载荷体积成倍膨胀；HTML 内的 < > 等同样原样输出。
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+        }))
+        {
+            writer.WriteStartObject();
+            writer.WritePropertyName("ops");
+            writer.WriteStartArray();
+            foreach (var op in Ops)
+            {
+                writer.WriteStartObject();
+                writer.WriteString(
+                    "t",
+                    op.Kind switch
+                    {
+                        PreviewPatchOpKind.Upsert => "i",
+                        PreviewPatchOpKind.Move => "m",
+                        PreviewPatchOpKind.Remove => "d",
+                        _ => throw new InvalidOperationException()
+                    });
+                writer.WriteString("id", op.Id);
+                // 与旧契约一致：null 字段直接缺省。
+                if (op.AfterId is not null)
                 {
-                    PreviewPatchOpKind.Upsert => "i",
-                    PreviewPatchOpKind.Move => "m",
-                    PreviewPatchOpKind.Remove => "d",
-                    _ => throw new InvalidOperationException()
-                },
-                op.Id,
-                op.AfterId,
-                op.Html);
+                    writer.WriteString("after", op.AfterId);
+                }
+
+                if (op.Html is not null)
+                {
+                    writer.WriteString("html", op.Html);
+                }
+
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+            writer.WriteEndObject();
         }
 
-        return JsonSerializer.Serialize(new PayloadDto(dtoOps), PayloadJsonOptions);
+        return Encoding.UTF8.GetString(buffer.WrittenSpan);
     }
 
-    /// <summary>从载荷 JSON 还原（测试与宿主演练契约用）。</summary>
+    /// <summary>从载荷 JSON 还原（测试与宿主演练契约用）。同样基于 JsonDocument，无反射。</summary>
     public static PreviewPatch FromPayloadJson(string json)
     {
-        var dto = JsonSerializer.Deserialize<PayloadDto>(json, PayloadJsonOptions)
-                  ?? throw new JsonException("预览补丁载荷为空。");
-
-        var ops = new List<PreviewPatchOp>(dto.Ops?.Length ?? 0);
-        if (dto.Ops is not null)
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
         {
-            foreach (var op in dto.Ops)
+            throw new JsonException("预览补丁载荷不是 JSON 对象。");
+        }
+
+        if (!root.TryGetProperty("ops", out var opsElement) || opsElement.ValueKind != JsonValueKind.Array)
+        {
+            throw new JsonException("预览补丁载荷缺少 ops 数组。");
+        }
+
+        var ops = new List<PreviewPatchOp>(opsElement.GetArrayLength());
+        foreach (var element in opsElement.EnumerateArray())
+        {
+            string? type = element.TryGetProperty("t", out var typeElement) ? typeElement.GetString() : null;
+            if (type is null)
             {
-                ops.Add(new PreviewPatchOp(
-                    op.Id,
-                    op.T switch
-                    {
-                        "i" => PreviewPatchOpKind.Upsert,
-                        "m" => PreviewPatchOpKind.Move,
-                        "d" => PreviewPatchOpKind.Remove,
-                        _ => throw new JsonException($"未知补丁操作类型：{op.T}")
-                    },
-                    op.After,
-                    op.Html));
+                throw new JsonException("补丁操作缺少 t 字段。");
             }
+
+            string? id = element.TryGetProperty("id", out var idElement) ? idElement.GetString() : null;
+            if (id is null)
+            {
+                throw new JsonException("补丁操作缺少 id 字段。");
+            }
+            var after = element.TryGetProperty("after", out var afterElement) ? afterElement.GetString() : null;
+            var html = element.TryGetProperty("html", out var htmlElement) ? htmlElement.GetString() : null;
+
+            ops.Add(new PreviewPatchOp(
+                id,
+                type switch
+                {
+                    "i" => PreviewPatchOpKind.Upsert,
+                    "m" => PreviewPatchOpKind.Move,
+                    "d" => PreviewPatchOpKind.Remove,
+                    _ => throw new JsonException($"未知补丁操作类型：{type}")
+                },
+                after,
+                html));
         }
 
         return new PreviewPatch(ops);
     }
-
-    internal static readonly JsonSerializerOptions PayloadJsonOptions = new()
-    {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        // 不转义非 ASCII（中文等），避免补丁载荷体积成倍膨胀；HTML 内的 < > 等同样原样输出。
-        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-    };
-
-    private sealed record PayloadDto([property: JsonPropertyName("ops")] PayloadOpDto[] Ops);
-
-    private sealed record PayloadOpDto(
-        [property: JsonPropertyName("t")] string T,
-        [property: JsonPropertyName("id")] string Id,
-        [property: JsonPropertyName("after")] string? After,
-        [property: JsonPropertyName("html")] string? Html);
 }

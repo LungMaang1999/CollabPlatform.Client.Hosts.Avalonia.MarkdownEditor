@@ -15,6 +15,7 @@ internal sealed class DocumentViewModel : INotifyPropertyChanged, IDisposable
     private readonly NodeViewModel _rootNode;
     private readonly StyleEditorViewModel _styleEditor;
     private readonly Action<MarkdownNode, NodeStyle> _requestStyleCommit;
+    private readonly Action<MarkdownNode, string, string?>? _requestAttributeCommit;
     private bool _isDisposed;
 
     public MarkdownDocument Document { get; }
@@ -33,11 +34,13 @@ internal sealed class DocumentViewModel : INotifyPropertyChanged, IDisposable
         MarkdownDocument document,
         IUiThreadDispatcher? uiDispatcher = null,
         IStylePreviewRenderer? stylePreviewRenderer = null,
-        Action<MarkdownNode, NodeStyle>? requestStyleCommit = null)
+        Action<MarkdownNode, NodeStyle>? requestStyleCommit = null,
+        Action<MarkdownNode, string, string?>? requestAttributeCommit = null)
     {
         Document = document ?? throw new ArgumentNullException(nameof(document));
         _requestStyleCommit = requestStyleCommit ?? ApplyStyleDirectly;
-        _rootNode = new NodeViewModel(document.Root, OnStyleCommitRequested);
+        _requestAttributeCommit = requestAttributeCommit;
+        _rootNode = new NodeViewModel(document.Root, OnStyleCommitRequested, OnAttributeCommitRequested);
         _styleEditor = new StyleEditorViewModel(uiDispatcher, stylePreviewRenderer);
     }
 
@@ -45,6 +48,12 @@ internal sealed class DocumentViewModel : INotifyPropertyChanged, IDisposable
     {
         if (_isDisposed) return;
         _requestStyleCommit(node, newStyle);
+    }
+
+    private void OnAttributeCommitRequested(MarkdownNode node, string key, string? value)
+    {
+        if (_isDisposed) return;
+        _requestAttributeCommit?.Invoke(node, key, value);
     }
 
     private void ApplyStyleDirectly(MarkdownNode node, NodeStyle newStyle)
@@ -78,6 +87,14 @@ internal sealed class DocumentViewModel : INotifyPropertyChanged, IDisposable
 
         var target = FindNodeViewModel(_rootNode, nodeId);
         target?.RaiseStylePropertiesChanged();
+    }
+
+    public void NotifyNodeAttributeChanged(string nodeId)
+    {
+        if (string.IsNullOrWhiteSpace(nodeId)) return;
+
+        var target = FindNodeViewModel(_rootNode, nodeId);
+        target?.RaiseAttributesChanged();
     }
 
     private static NodeViewModel? FindNodeViewModel(NodeViewModel current, string nodeId)

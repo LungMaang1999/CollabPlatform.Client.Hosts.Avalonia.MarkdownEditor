@@ -1,6 +1,6 @@
-﻿namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Editing.Commands;
+namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Editing.Commands;
 
-public sealed class BatchCommand : IEditorCommand, IEditorCommandState
+public sealed class BatchCommand : IEditorCommand, IEditorCommandState, IEditorCommandMemory
 {
     private readonly IReadOnlyList<IEditorCommand> _commands;
 
@@ -28,5 +28,21 @@ public sealed class BatchCommand : IEditorCommand, IEditorCommandState
     {
         for (int i = _commands.Count - 1; i >= 0; i--)
             _commands[i].Undo();
+    }
+
+    public long EstimatedBytes
+    {
+        get
+        {
+            long total = 256;
+            foreach (var command in _commands)
+            {
+                total += command is IEditorCommandMemory memory
+                    ? memory.EstimatedBytes
+                    : 512;
+            }
+
+            return total;
+        }
     }
 }

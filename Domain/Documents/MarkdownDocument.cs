@@ -276,7 +276,7 @@ public sealed class MarkdownDocument
     private static void AppendNodeStyleFast(StringBuilder sb, NodeStyle? s)
     {
         if (s is null) return;
-        sb.Append($"{s.FontFamily};{s.FontSize};{s.ForegroundColor};{s.BackgroundColor};{s.Bold};{s.Italic};{s.LineHeight};{s.TextAlign};{s.BorderColor};{s.BorderWidth};{s.CustomCss};");
+        sb.Append($"{s.FontFamily};{s.FontSize};{s.ForegroundColor};{s.BackgroundColor};{s.Bold};{s.Italic};{s.LineHeight};{s.TextAlign};{s.BorderColor};{s.BorderWidth};{s.BorderRadius};{s.CustomCss};");
         if (s.Margin is not null) sb.Append($"M:{s.Margin.Left},{s.Margin.Top},{s.Margin.Right},{s.Margin.Bottom};");
         if (s.Padding is not null) sb.Append($"P:{s.Padding.Left},{s.Padding.Top},{s.Padding.Right},{s.Padding.Bottom};");
     }
@@ -286,6 +286,7 @@ public sealed class MarkdownDocument
         style.BackgroundColor is null && style.Bold is null && style.Italic is null &&
         style.LineHeight is null && style.TextAlign is null && style.Margin is null &&
         style.Padding is null && style.BorderColor is null && (style.BorderWidth is null or 0) &&
+        style.BorderRadius is null &&
         string.IsNullOrWhiteSpace(style.CustomCss));
 
     private static string ComputeSha256(string value) =>

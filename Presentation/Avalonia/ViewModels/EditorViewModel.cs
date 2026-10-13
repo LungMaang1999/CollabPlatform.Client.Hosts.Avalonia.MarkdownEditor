@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Documents;
@@ -102,6 +104,28 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
     public string CurrentSourceMarkdown => _activeDocument?.Document.SourceMarkdown ?? string.Empty;
 
     public StyleEditorViewModel? ActiveStyleEditor => _activeDocument?.StyleEditor;
+
+    private MarkdownDocument? _effectiveStyleDocument;
+    private StyleResolver? _effectiveStyleResolver;
+
+    /// <summary>
+    /// 解析指定节点的【生效计算样式】（已含默认兜底、祖先继承、类型/命名样式）。
+    /// 供属性面板展示“未覆盖时实际生效值”。resolver 随活动文档复用，文档切换时重建。
+    /// </summary>
+    public ComputedStyle? ResolveEffectiveStyle(MarkdownNode node)
+    {
+        var document = _activeDocument?.Document;
+        if (document is null || node is null)
+            return null;
+
+        if (!ReferenceEquals(_effectiveStyleDocument, document) || _effectiveStyleResolver is null)
+        {
+            _effectiveStyleDocument = document;
+            _effectiveStyleResolver = new StyleResolver(document);
+        }
+
+        return _effectiveStyleResolver.Resolve(node);
+    }
 
     public void SelectNodeById(string nodeId)
     {
@@ -212,7 +236,13 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         });
     }
 
-    public async Task OpenDocumentAsync(string filePath, CancellationToken ct = default)
+    public Task OpenDocumentAsync(string filePath, CancellationToken ct = default) =>
+        OpenDocumentAsync(filePath, loadStyle: true, ct);
+
+    /// <summary>
+    /// 打开文档。loadStyle=false 用于用户在确认框中拒绝载入同名伴随样式文件的场景。
+    /// </summary>
+    public async Task OpenDocumentAsync(string filePath, bool loadStyle, CancellationToken ct = default)
     {
         try
         {
@@ -222,7 +252,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
                 ErrorMessage = null;
             });
 
-            await _documentService.OpenAsync(filePath, ct).ConfigureAwait(false);
+            await _documentService.OpenAsync(filePath, loadStyle, ct).ConfigureAwait(false);
             _commandManager.Clear();
 
             RunOnUIThread(() =>
@@ -240,6 +270,76 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         {
             RunOnUIThread(() => IsBusy = false);
         }
+    }
+
+    /// <summary>
+    /// 探测指定 markdown 文件是否存在同名伴随样式文件；存在返回实际路径（兼容旧命名）。
+    /// UI 层在打开前调用，据此弹出“是否载入样式文件”确认框。
+    /// </summary>
+    public string? FindStyleCompanion(string markdownFilePath) =>
+        _documentService.FindStyleCompanion(markdownFilePath);
+
+    /// <summary>
+    /// 从内存文本载入（浏览器端打开本地文件的通道）：无文件路径，
+    /// 保存时必须走另存。
+    /// </summary>
+    public Task OpenFromTextAsync(string markdown, CancellationToken ct = default) =>
+        OpenFromTextAsync(markdown, styleXml: null, ct);
+
+    /// <summary>
+    /// 从内存文本载入并附带伴随样式 XML 文本（浏览器端多文件选择配对通道）：
+    /// styleXml 为 null 时按纯 Markdown 载入。无文件路径，保存时必须走另存。
+    /// </summary>
+    public async Task OpenFromTextAsync(string markdown, string? styleXml, CancellationToken ct = default)
+    {
+        try
+        {
+            RunOnUIThread(() =>
+            {
+                IsBusy = true;
+                ErrorMessage = null;
+            });
+
+            await _documentService.OpenFromTextAsync(markdown, styleXml, ct).ConfigureAwait(false);
+            _commandManager.Clear();
+
+            RunOnUIThread(() =>
+            {
+                OnPropertyChanged(nameof(CanUndo));
+                OnPropertyChanged(nameof(CanRedo));
+            });
+        }
+        catch (Exception ex)
+        {
+            RunOnUIThread(() => ErrorMessage = $"Failed to open file: {ex.Message}");
+            throw;
+        }
+        finally
+        {
+            RunOnUIThread(() => IsBusy = false);
+        }
+    }
+
+    /// <summary>
+    /// 将当前文档的 Markdown 内容写入指定流（浏览器端另存通道），写完后
+    /// 标记文档为已保存。调用方负责释放流。
+    /// </summary>
+    public async Task WriteMarkdownToStreamAsync(
+        Stream target,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+
+        var doc = _documentService.CurrentDocument
+            ?? throw new InvalidOperationException("No document is currently open.");
+
+        var bytes = Encoding.UTF8.GetBytes(doc.SourceMarkdown);
+        await target.WriteAsync(bytes, ct).ConfigureAwait(false);
+        await target.FlushAsync(ct).ConfigureAwait(false);
+
+        _documentService.MarkCurrentSaved();
+
+        RunOnUIThread(() => OnPropertyChanged(nameof(IsModified)));
     }
 
     public void NewDocument()
@@ -355,6 +455,72 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
             }
 
             // 换树前不刷新预览，提交成功后由 CommitBackgroundParse 调度。
+        }
+        else
+        {
+            ScheduleUpdatePreview();
+        }
+
+        OnPropertyChanged(nameof(IsModified));
+        OnPropertyChanged(nameof(ActiveDocument));
+        OnPropertyChanged(nameof(CurrentSourceMarkdown));
+        OnPropertyChanged(nameof(CanUndo));
+        OnPropertyChanged(nameof(CanRedo));
+
+        if (!useBackground)
+        {
+            OnPropertyChanged(nameof(RootNode));
+            OnPropertyChanged(nameof(DocumentRootNode));
+        }
+    }
+
+    /// <summary>
+    /// 修改标题等级（H1–H6），经可撤销的 ChangeHeadingLevelCommand 改源码；
+    /// 无实际等级变化时不产生命令。属性面板标题等级控件调用。
+    /// </summary>
+    public void ChangeHeadingLevel(MarkdownNode heading, int newLevel)
+    {
+        ArgumentNullException.ThrowIfNull(heading);
+        EnsureEditableDocument();
+
+        newLevel = Math.Clamp(newLevel, 1, 6);
+        if (heading.Type != NodeType.Heading || heading.Level == newLevel)
+        {
+            return;
+        }
+
+        var document = ActiveDocument!.Document;
+        var cmd = new ChangeHeadingLevelCommand(document, _editApplier, _sourceEditor, heading, newLevel);
+        var useBackground = UseBackgroundParsing(document);
+        var sourceChanged = false;
+
+        lock (document)
+        {
+            var sourceBefore = document.SourceMarkdown;
+            _commandManager.Execute(cmd);
+            sourceChanged = !string.Equals(sourceBefore, document.SourceMarkdown, StringComparison.Ordinal);
+
+            if (!useBackground)
+            {
+                ParseAndCommitInline(document);
+                ActiveDocument.RefreshAst();
+                document.NormalizeEditorState();
+
+                if (!string.IsNullOrWhiteSpace(document.EditorState.SelectedNodeId))
+                {
+                    SelectionService.SelectById(document, document.EditorState.SelectedNodeId);
+                }
+
+                ResyncSelectionAfterAstChange();
+            }
+        }
+
+        if (useBackground)
+        {
+            if (sourceChanged)
+            {
+                RequestBackgroundParse(document);
+            }
         }
         else
         {
@@ -884,7 +1050,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
             }
             else
             {
-                ActiveDocument = new DocumentViewModel(doc, _uiDispatcher, _stylePreviewRenderer, ApplyNodeStyle);
+                ActiveDocument = new DocumentViewModel(doc, _uiDispatcher, _stylePreviewRenderer, ApplyNodeStyle, ApplyNodeAttribute);
                 _activeRenderer = _rendererFactory.CreatePreview(doc);
                 SelectionService.Select(null);
                 ScheduleUpdatePreview(immediate: true);
@@ -928,6 +1094,50 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(nameof(CanRedo));
     }
 
+    /// <summary>
+    /// 供宿主层投影节点（大纲搜索结果、标题树等裸构造 NodeViewModel）提交
+    /// 样式修改的公开入口：与主树节点共用同一命令管线（可撤销、刷新预览）。
+    /// </summary>
+    public void CommitNodeStyle(MarkdownNode node, NodeStyle newStyle) =>
+        ApplyNodeStyle(node, newStyle);
+
+    /// <summary>
+    /// 供宿主层投影节点提交块属性修改的公开入口，语义同 <see cref="CommitNodeStyle"/>。
+    /// </summary>
+    public void CommitNodeAttribute(MarkdownNode node, string key, string? value) =>
+        ApplyNodeAttribute(node, key, value);
+
+    /// <summary>
+    /// 块参数（如自定义图标）走属性命令栈：可撤销、立即重渲染预览。
+    /// 与源码派生键不同，这类用户属性在重解析身份匹配时会被继承。
+    /// </summary>
+    private void ApplyNodeAttribute(MarkdownNode node, string key, string? value)
+    {
+        if (_isDisposed || _activeDocument is null) return;
+        ArgumentNullException.ThrowIfNull(node);
+        ArgumentException.ThrowIfNullOrWhiteSpace(key);
+
+        var document = _activeDocument.Document;
+
+        lock (document)
+        {
+            var target = document.FindNode(node.Id) ?? node;
+            var hadValue = target.Attributes.TryGetValue(key, out var oldValue);
+            if ((value is null && !hadValue) || (value is not null && string.Equals(oldValue, value, StringComparison.Ordinal)))
+                return;
+
+            var command = new ChangeAttributeCommand(document, target, key, value);
+            _commandManager.Execute(command);
+
+            _activeDocument.NotifyNodeAttributeChanged(target.Id);
+        }
+
+        ScheduleUpdatePreview();
+        OnPropertyChanged(nameof(IsModified));
+        OnPropertyChanged(nameof(CanUndo));
+        OnPropertyChanged(nameof(CanRedo));
+    }
+
     private void ResyncSelectionAfterAstChange()
     {
         if (_activeDocument is null) return;
@@ -958,12 +1168,16 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         && a.FontSize == b.FontSize
         && NullableEquals(a.LineHeight, b.LineHeight)
         && string.Equals(a.TextAlign, b.TextAlign, StringComparison.Ordinal)
+        && string.Equals(a.VerticalAlign, b.VerticalAlign, StringComparison.Ordinal)
         && a.Bold == b.Bold
         && a.Italic == b.Italic
         && string.Equals(a.ForegroundColor, b.ForegroundColor, StringComparison.Ordinal)
         && string.Equals(a.BackgroundColor, b.BackgroundColor, StringComparison.Ordinal)
         && string.Equals(a.BorderColor, b.BorderColor, StringComparison.Ordinal)
         && NullableEquals(a.BorderWidth, b.BorderWidth)
+        && NullableEquals(a.BorderRadius, b.BorderRadius)
+        && NullableEquals(a.Width, b.Width)
+        && NullableEquals(a.Gap, b.Gap)
         && Equals(a.Margin, b.Margin)
         && Equals(a.Padding, b.Padding)
         && string.Equals(a.CustomCss, b.CustomCss, StringComparison.Ordinal);

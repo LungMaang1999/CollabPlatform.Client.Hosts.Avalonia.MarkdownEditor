@@ -42,10 +42,10 @@ internal static class MarkdownSyntaxPlanner
             MarkdownSyntaxType.Heading5 => ToggleHeading(source, safeStart, 5),
             MarkdownSyntaxType.Heading6 => ToggleHeading(source, safeStart, 6),
 
-            MarkdownSyntaxType.Bold => InlineWrap(source, safeStart, safeEnd, "**", "**"),
-            MarkdownSyntaxType.Italic => InlineWrap(source, safeStart, safeEnd, "*", "*"),
-            MarkdownSyntaxType.Strikethrough => InlineWrap(source, safeStart, safeEnd, "~~", "~~"),
-            MarkdownSyntaxType.InlineCode => InlineWrap(source, safeStart, safeEnd, "`", "`"),
+            MarkdownSyntaxType.Bold => InlineWrap(source, safeStart, safeEnd, "**", "**", "粗体文本"),
+            MarkdownSyntaxType.Italic => InlineWrap(source, safeStart, safeEnd, "*", "*", "斜体文本"),
+            MarkdownSyntaxType.Strikethrough => InlineWrap(source, safeStart, safeEnd, "~~", "~~", "删除文本"),
+            MarkdownSyntaxType.InlineCode => InlineWrap(source, safeStart, safeEnd, "`", "`", "代码"),
 
             MarkdownSyntaxType.CodeBlock => ToggleCodeFence(source, safeStart, safeEnd),
             MarkdownSyntaxType.Quote => ToggleLinePrefix(source, safeStart, safeEnd, LinePrefixKind.Quote),
@@ -166,7 +166,8 @@ internal static class MarkdownSyntaxPlanner
         int start,
         int end,
         string prefix,
-        string suffix)
+        string suffix,
+        string placeholder)
     {
         int length = end - start;
         string selected = source.Substring(start, length);
@@ -176,9 +177,10 @@ internal static class MarkdownSyntaxPlanner
 
         if (length == 0)
         {
-            replacement = prefix + suffix;
+            // 无选区：插入带示例文字的完整语法并选中示例，键入即替换
+            replacement = prefix + placeholder + suffix;
             localSelectionStart = prefix.Length;
-            localSelectionLength = 0;
+            localSelectionLength = placeholder.Length;
         }
         else if (selected.StartsWith(prefix, StringComparison.Ordinal) &&
                  selected.EndsWith(suffix, StringComparison.Ordinal) &&
@@ -245,9 +247,24 @@ internal static class MarkdownSyntaxPlanner
             }
         }
 
+        // 空行（含空文档）：插入一个带示例文字的完整项并选中示例，
+        // 否则前缀只能加在已有文本前，按钮在空行上表现为完全无效
         if (!hasContent)
         {
-            allMarked = false;
+            string placeholder = kind switch
+            {
+                LinePrefixKind.Quote => "引用文本",
+                LinePrefixKind.Task => "待办事项",
+                _ => "列表项"
+            };
+
+            string example = AddPrefix(placeholder, kind, 0);
+
+            return new SyntaxPlan(
+                CreateRange(source, blockStart, blockEnd),
+                example,
+                blockStart + example.Length - placeholder.Length,
+                placeholder.Length);
         }
 
         var newLines = new List<string>(lines.Length);
@@ -340,6 +357,7 @@ internal static class MarkdownSyntaxPlanner
     private static SyntaxPlan ToggleCodeFence(string source, int start, int end)
     {
         var (blockStart, blockEnd) = BlockLineBounds(source, start, end);
+        string block = source[blockStart..blockEnd];
 
         int prevLineStart = 0;
         int prevLineEnd = -1;
@@ -381,14 +399,17 @@ internal static class MarkdownSyntaxPlanner
             }
         }
 
-        string block = source[blockStart..blockEnd];
-        string replacement = "```\n" + block + "\n```";
+        // 空行插入带示例文字的围栏并选中示例；有内容则包裹所选整行
+        const string placeholder = "代码片段";
+        bool usePlaceholder = string.IsNullOrEmpty(block);
+        string body = usePlaceholder ? placeholder : block;
+        string replacement = "```\n" + body + "\n```";
 
         return new SyntaxPlan(
             CreateRange(source, blockStart, blockEnd),
             replacement,
             blockStart + 4,
-            block.Length);
+            body.Length);
     }
 
     private static SyntaxPlan InsertLink(string source, int start, int end, bool image)

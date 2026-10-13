@@ -3,7 +3,7 @@ using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Documents;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Editing.Commands;
 
-public sealed class ReplaceMarkdownSourceCommand : IEditorCommand, IEditorCommandState
+public sealed class ReplaceMarkdownSourceCommand : IEditorCommand, IEditorCommandState, IEditorCommandMemory
 {
     private readonly MarkdownDocument _document;
     private readonly string _newSource;
@@ -40,4 +40,7 @@ public sealed class ReplaceMarkdownSourceCommand : IEditorCommand, IEditorComman
         _editApplier.Apply(_document, source);
         return true;
     }
+
+    public long EstimatedBytes =>
+        2L * ((_oldSource?.Length ?? 0) + _newSource.Length) + 256;
 }

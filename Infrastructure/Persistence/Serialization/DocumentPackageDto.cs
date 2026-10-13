@@ -1,4 +1,4 @@
-﻿using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Schema;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Schema;
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -76,10 +76,15 @@ internal sealed class NodeStyleDto
     public bool? Italic { get; set; }
     public double? LineHeight { get; set; }
     public string? TextAlign { get; set; }
+
+    public string? VerticalAlign { get; set; }
     public ThicknessValueDto? Margin { get; set; }
     public ThicknessValueDto? Padding { get; set; }
     public string? BorderColor { get; set; }
     public double? BorderWidth { get; set; }
+    public double? BorderRadius { get; set; }
+    public double? Width { get; set; }
+    public double? Gap { get; set; }
     public string? CustomCss { get; set; }
 }
 

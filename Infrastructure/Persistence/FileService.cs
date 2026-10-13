@@ -13,7 +13,10 @@ namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Per
 
 public sealed class FileService : IFileService
 {
-    private const string StyleFileSuffix = ".style.xml";
+    // 伴随样式文件命名：与 markdown 文件同名再加 ".styles.xml"（如 note.md → note.md.styles.xml）。
+    private const string StyleFileSuffix = ".styles.xml";
+    // 旧版命名，仅读取兼容；保存一律写新命名。
+    private const string LegacyStyleFileSuffix = ".style.xml";
     private static readonly Encoding Utf8Encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false);
 
     private readonly IDocumentSerializer _serializer;
@@ -31,11 +34,24 @@ public sealed class FileService : IFileService
         return Path.GetFullPath(markdownFilePath) + StyleFileSuffix;
     }
 
-    public async Task<DocumentLoadResult> LoadAsync(string markdownFilePath, CancellationToken cancellationToken = default)
+    public string? FindExistingStyleFilePath(string markdownFilePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(markdownFilePath);
+        var preferred = Path.GetFullPath(markdownFilePath) + StyleFileSuffix;
+        if (File.Exists(preferred)) return preferred;
+
+        var legacy = Path.GetFullPath(markdownFilePath) + LegacyStyleFileSuffix;
+        return File.Exists(legacy) ? legacy : null;
+    }
+
+    public Task<DocumentLoadResult> LoadAsync(string markdownFilePath, CancellationToken cancellationToken = default) =>
+        LoadAsync(markdownFilePath, loadStyle: true, cancellationToken);
+
+    public async Task<DocumentLoadResult> LoadAsync(string markdownFilePath, bool loadStyle, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(markdownFilePath);
         var fullMarkdownPath = Path.GetFullPath(markdownFilePath);
-        var styleFilePath = GetStyleFilePath(fullMarkdownPath);
+        var preferredStylePath = GetStyleFilePath(fullMarkdownPath);
 
         if (!File.Exists(fullMarkdownPath))
             throw new FileNotFoundException("Markdown file was not found.", fullMarkdownPath);
@@ -49,17 +65,24 @@ public sealed class FileService : IFileService
         var markdownHash = await ComputeHashAsync(fullMarkdownPath, cancellationToken).ConfigureAwait(false);
         var markdownInfo = new FileInfo(fullMarkdownPath);
 
+        // loadStyle=false 表示用户拒绝载入样式：仍解析出干净的纯 Markdown 文档，
+        // 但快照必须记住磁盘上样式文件的真实哈希，后续保存时原样保留、绝不覆盖。
         MarkdownDocument? documentFromXml = null;
-        if (File.Exists(styleFilePath))
+        string? loadedStylePath = null;
+        if (loadStyle)
         {
-            await using var styleStream = new FileStream(
-                styleFilePath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                64 * 1024,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-            documentFromXml = _serializer.Deserialize(styleStream, markdown, fullMarkdownPath);
+            loadedStylePath = FindExistingStyleFilePath(fullMarkdownPath);
+            if (loadedStylePath is not null)
+            {
+                await using var styleStream = new FileStream(
+                    loadedStylePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    64 * 1024,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan);
+                documentFromXml = _serializer.Deserialize(styleStream, markdown, fullMarkdownPath);
+            }
         }
 
         var parseResult = _parser.Parse(markdown, previous: documentFromXml, mode: ParseMode.Loading);
@@ -67,17 +90,62 @@ public sealed class FileService : IFileService
         document.FilePath = fullMarkdownPath;
         document.MarkSaved();
 
-        if (!File.Exists(styleFilePath))
+        if (loadedStylePath is not null)
         {
-            var missingSnapshot = DocumentFileSnapshot.ForMissingStyleFile(fullMarkdownPath, markdownHash, markdownInfo.LastWriteTimeUtc, styleFilePath);
+            var styleHash = await ComputeHashAsync(loadedStylePath, cancellationToken).ConfigureAwait(false);
+            var styleInfo = new FileInfo(loadedStylePath);
+            var snapshot = new DocumentFileSnapshot(
+                fullMarkdownPath, loadedStylePath, markdownHash, styleHash,
+                markdownInfo.LastWriteTimeUtc, styleInfo.LastWriteTimeUtc,
+                StyleFileExists: true, StyleLoadDeclined: false);
+            return new DocumentLoadResult(document, snapshot);
+        }
+
+        var declinedPath = FindExistingStyleFilePath(fullMarkdownPath);
+        if (declinedPath is null)
+        {
+            var missingSnapshot = DocumentFileSnapshot.ForMissingStyleFile(fullMarkdownPath, markdownHash, markdownInfo.LastWriteTimeUtc, preferredStylePath);
             return new DocumentLoadResult(document, missingSnapshot);
         }
 
-        var styleHash = await ComputeHashAsync(styleFilePath, cancellationToken).ConfigureAwait(false);
-        var styleInfo = new FileInfo(styleFilePath);
-        var snapshot = new DocumentFileSnapshot(fullMarkdownPath, styleFilePath, markdownHash, styleHash, markdownInfo.LastWriteTimeUtc, styleInfo.LastWriteTimeUtc, StyleFileExists: true);
+        var declinedHash = await ComputeHashAsync(declinedPath, cancellationToken).ConfigureAwait(false);
+        var declinedInfo = new FileInfo(declinedPath);
+        var declinedSnapshot = new DocumentFileSnapshot(
+            fullMarkdownPath, declinedPath, markdownHash, declinedHash,
+            markdownInfo.LastWriteTimeUtc, declinedInfo.LastWriteTimeUtc,
+            StyleFileExists: true, StyleLoadDeclined: true);
+        return new DocumentLoadResult(document, declinedSnapshot);
+    }
 
-        return new DocumentLoadResult(document, snapshot);
+    /// <summary>
+    /// 从内存文本加载（浏览器通道）：只解析 Markdown，文档无文件路径、无快照，
+    /// 标记为已保存初始态；与 NewDocument 的区别是内容已解析完毕。
+    /// </summary>
+    public DocumentLoadResult LoadFromText(string markdown) =>
+        LoadFromText(markdown, styleXml: null);
+
+    /// <summary>
+    /// 从内存文本加载并附带伴随样式 XML 文本（浏览器端多文件选择配对通道）。
+    /// 样式 XML 反序列化后作为解析 previous 参与样式继承，与磁盘打开路径一致；
+    /// styleXml 为空时按纯 Markdown 解析。文档无文件路径、无快照。
+    /// </summary>
+    public DocumentLoadResult LoadFromText(string markdown, string? styleXml)
+    {
+        ArgumentNullException.ThrowIfNull(markdown);
+
+        MarkdownDocument? documentFromXml = null;
+        if (!string.IsNullOrWhiteSpace(styleXml))
+        {
+            using var styleStream = new MemoryStream(Utf8Encoding.GetBytes(styleXml));
+            documentFromXml = _serializer.Deserialize(styleStream, markdown, string.Empty);
+        }
+
+        var parseResult = _parser.Parse(markdown, previous: documentFromXml, mode: ParseMode.Loading);
+        var document = parseResult.Document;
+        document.FilePath = string.Empty;
+        document.MarkSaved();
+
+        return new DocumentLoadResult(document, Snapshot: null);
     }
 
     public async Task<DocumentFileSnapshot> SaveAsync(MarkdownDocument document, DocumentFileSnapshot? expectedSnapshot = null, CancellationToken cancellationToken = default)
@@ -102,16 +170,25 @@ public sealed class FileService : IFileService
         }
         var markdownHash = ComputeSha256(markdownBytes);
 
-        await using var xmlMemoryStream = new MemoryStream();
-        lock (document)
+        // 拒绝载入且此后未改过任何节点样式时，保存只更新 .md；
+        // 磁盘上的样式文件原样保留，避免用空白样式覆盖用户既有样式。
+        var preserveStyleFile = expectedSnapshot?.StyleLoadDeclined == true && !document.IsStyleModified;
+
+        byte[]? styleBytes = null;
+        var styleHash = string.Empty;
+        if (!preserveStyleFile)
         {
-            _serializer.Serialize(document, xmlMemoryStream, Path.GetFileName(markdownFilePath), markdownHash);
+            await using var xmlMemoryStream = new MemoryStream();
+            lock (document)
+            {
+                _serializer.Serialize(document, xmlMemoryStream, Path.GetFileName(markdownFilePath), markdownHash);
+            }
+            styleBytes = xmlMemoryStream.ToArray();
+            styleHash = ComputeSha256(styleBytes);
         }
-        var styleBytes = xmlMemoryStream.ToArray();
-        var styleHash = ComputeSha256(styleBytes);
 
         var markdownTemp = CreateTempPath(directory, Path.GetFileName(markdownFilePath));
-        var styleTemp = CreateTempPath(directory, Path.GetFileName(styleFilePath));
+        var styleTemp = preserveStyleFile ? string.Empty : CreateTempPath(directory, Path.GetFileName(styleFilePath));
 
         string? markdownBackup = null;
         string? styleBackup = null;
@@ -119,7 +196,10 @@ public sealed class FileService : IFileService
         try
         {
             await WriteAllBytesAsync(markdownTemp, markdownBytes, cancellationToken).ConfigureAwait(false);
-            await WriteAllBytesAsync(styleTemp, styleBytes, cancellationToken).ConfigureAwait(false);
+            if (styleBytes is not null)
+            {
+                await WriteAllBytesAsync(styleTemp, styleBytes, cancellationToken).ConfigureAwait(false);
+            }
 
             await EnsureNoExternalModificationAsync(markdownFilePath, styleFilePath, expectedSnapshot, cancellationToken).ConfigureAwait(false);
 
@@ -129,7 +209,7 @@ public sealed class FileService : IFileService
                 File.Copy(markdownFilePath, markdownBackup, overwrite: true);
             }
 
-            if (File.Exists(styleFilePath))
+            if (styleBytes is not null && File.Exists(styleFilePath))
             {
                 styleBackup = CreateTempPath(directory, Path.GetFileName(styleFilePath) + ".bak");
                 File.Copy(styleFilePath, styleBackup, overwrite: true);
@@ -138,11 +218,13 @@ public sealed class FileService : IFileService
             ReplaceFileSafely(markdownTemp, markdownFilePath);
             markdownTemp = string.Empty;
 
-            ReplaceFileSafely(styleTemp, styleFilePath);
-            styleTemp = string.Empty;
+            if (styleBytes is not null)
+            {
+                ReplaceFileSafely(styleTemp, styleFilePath);
+                styleTemp = string.Empty;
+            }
 
             var markdownInfo = new FileInfo(markdownFilePath);
-            var styleInfo = new FileInfo(styleFilePath);
 
             lock (document)
             {
@@ -150,7 +232,32 @@ public sealed class FileService : IFileService
                 document.MarkSaved();
             }
 
-            return new DocumentFileSnapshot(markdownFilePath, styleFilePath, markdownHash, styleHash, markdownInfo.LastWriteTimeUtc, styleInfo.LastWriteTimeUtc, StyleFileExists: true);
+            if (preserveStyleFile)
+            {
+                // 保留场景：目标位置已有样式文件则记录其当前哈希（未改动）；
+                // 没有则按缺失记录，保持拒绝载入标记供后续保存延续该语义。
+                var preservedPath = FindExistingStyleFilePath(markdownFilePath);
+                if (preservedPath is not null)
+                {
+                    var preservedHash = await ComputeHashAsync(preservedPath, cancellationToken).ConfigureAwait(false);
+                    var preservedInfo = new FileInfo(preservedPath);
+                    return new DocumentFileSnapshot(
+                        markdownFilePath, preservedPath, markdownHash, preservedHash,
+                        markdownInfo.LastWriteTimeUtc, preservedInfo.LastWriteTimeUtc,
+                        StyleFileExists: true, StyleLoadDeclined: true);
+                }
+
+                return new DocumentFileSnapshot(
+                    markdownFilePath, styleFilePath, markdownHash, string.Empty,
+                    markdownInfo.LastWriteTimeUtc, DateTime.MinValue,
+                    StyleFileExists: false, StyleLoadDeclined: true);
+            }
+
+            var styleInfo = new FileInfo(styleFilePath);
+            return new DocumentFileSnapshot(
+                markdownFilePath, styleFilePath, markdownHash, styleHash,
+                markdownInfo.LastWriteTimeUtc, styleInfo.LastWriteTimeUtc,
+                StyleFileExists: true, StyleLoadDeclined: false);
         }
         catch (Exception primaryEx)
         {
@@ -217,10 +324,14 @@ public sealed class FileService : IFileService
         if (!HashesEqual(expected.MarkdownHash, actualMarkdownHash))
             throw new FileSaveConflictException(markdownPath, expected.MarkdownHash, actualMarkdownHash);
 
-        var actualStyleHash = await ComputeHashAsync(stylePath, cancellationToken).ConfigureAwait(false);
+        // 冲突检测始终以快照记录的真实样式路径为准（兼容读取的旧命名文件）。
+        var styleCheckPath = expected.StyleFileExists
+            ? expected.StyleFilePath
+            : stylePath;
+        var actualStyleHash = await ComputeHashAsync(styleCheckPath, cancellationToken).ConfigureAwait(false);
         var expectedStyleHash = expected.StyleFileExists ? expected.StyleFileHash : string.Empty;
         if (!HashesEqual(expectedStyleHash, actualStyleHash))
-            throw new FileSaveConflictException(stylePath, expectedStyleHash, actualStyleHash);
+            throw new FileSaveConflictException(styleCheckPath, expectedStyleHash, actualStyleHash);
     }
 
     private static async Task WriteAllBytesAsync(string path, byte[] bytes, CancellationToken ct)

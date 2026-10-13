@@ -1,4 +1,5 @@
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Diagnostics;
+using System.Globalization;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax.Factories;
 using System.Text;
@@ -50,7 +51,8 @@ public sealed class MarkdigToNodeConverter
     {
         if (unclosedFenceStartLine.HasValue
             && node.Range.StartLine == unclosedFenceStartLine.Value
-            && node.Type is NodeType.CodeBlock or NodeType.MathBlock or NodeType.Mermaid)
+            && node.Type is NodeType.CodeBlock or NodeType.MathBlock or NodeType.Mermaid
+                or NodeType.ImageMatrix or NodeType.QrCode or NodeType.PoemBlock)
         {
             // 文档末尾未闭合围栏对应的代码/math 围栏/mermaid 块。
             node.Attributes[MarkdownAttributes.Unclosed] = "true";
@@ -240,7 +242,6 @@ public sealed class MarkdigToNodeConverter
                         NodeCategory.Container,
                         range: range);
 
-                    var footnoteIndex = 1;
                     foreach (var blockObj in footnoteGroup)
                     {
                         if (blockObj is not Footnote footnoteBlock)
@@ -253,9 +254,27 @@ public sealed class MarkdigToNodeConverter
                             NodeCategory.Container,
                             range: ExtractSourceRange(footnoteBlock));
 
-                        footnoteNode.Attributes["index"] = footnoteIndex.ToString();
-                        footnoteNode.Attributes["id"] = $"fn-{footnoteIndex}";
-                        footnoteNode.Text = footnoteIndex.ToString();
+                        // 保留用户原始标签作为显示文本（数字 42、字母 alpha 等），
+                        // 锚点用确定性 slug；多处引用时 backrefs 记录每个引用的锚点。
+                        var label = ExtractFootnoteLabel(footnoteBlock.Label);
+                        var slug = BuildFootnoteSlug(label, footnoteBlock.Order);
+
+                        footnoteNode.Attributes["label"] = label;
+                        footnoteNode.Attributes["slug"] = slug;
+                        footnoteNode.Attributes["id"] = "fn-" + slug;
+
+                        var backrefAnchors = new StringBuilder();
+                        for (var linkIndex = 0; linkIndex < footnoteBlock.Links.Count; linkIndex++)
+                        {
+                            if (linkIndex > 0)
+                            {
+                                backrefAnchors.Append(',');
+                            }
+
+                            backrefAnchors.Append(BuildFootnoteRefAnchor(slug, linkIndex));
+                        }
+
+                        footnoteNode.Attributes["backrefs"] = backrefAnchors.ToString();
 
                         var children = ConvertChildren(footnoteBlock, diagnostics);
                         foreach (var child in children)
@@ -264,7 +283,6 @@ public sealed class MarkdigToNodeConverter
                         }
 
                         groupNode.AddChild(footnoteNode);
-                        footnoteIndex++;
                     }
 
                     return groupNode;
@@ -276,6 +294,26 @@ public sealed class MarkdigToNodeConverter
                     NodeCategory.Block,
                     text: mathBlock.Lines.ToString().TrimEnd('\r', '\n'),
                     range: range);
+
+            case ImageMatrixBlock matrixBlock:
+                return _nodeFactory.Create(
+                    NodeType.ImageMatrix,
+                    NodeCategory.Block,
+                    text: matrixBlock.Lines.ToString().TrimEnd('\r', '\n'),
+                    range: range);
+
+            case PoemBlock poemBlock:
+                {
+                    var poemNode = _nodeFactory.Create(
+                        NodeType.PoemBlock,
+                        NodeCategory.Block,
+                        text: poemBlock.Lines.ToString().TrimEnd('\r', '\n'),
+                        range: range);
+                    poemNode.Attributes["poem-type"] = poemBlock.PoemType.ToString();
+                    poemNode.Attributes["poem-alias"] = poemBlock.Alias;
+                    BuildPoemParts(poemNode);
+                    return poemNode;
+                }
 
             case FencedCodeBlock codeBlock:
                 {
@@ -303,6 +341,35 @@ public sealed class MarkdigToNodeConverter
                             NodeCategory.Block,
                             text: codeText.TrimEnd('\r', '\n'),
                             range: range);
+                    }
+
+                    if (string.Equals(infoToken, "image", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(infoToken, "img", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return _nodeFactory.Create(
+                            NodeType.ImageMatrix,
+                            NodeCategory.Block,
+                            text: codeText.TrimEnd('\r', '\n'),
+                            range: range);
+                    }
+
+                    if (string.Equals(infoToken, "qrcode", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(infoToken, "qr", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var qrNode = _nodeFactory.Create(
+                            NodeType.QrCode,
+                            NodeCategory.Block,
+                            text: codeText.TrimEnd('\r', '\n'),
+                            range: range);
+
+                        // Markdig 把围栏 info 拆为 Info（首词）与 Arguments（其余部分），
+                        // 选项在 Arguments 中，两者合并后解析。
+                        var fullInfo = string.IsNullOrWhiteSpace(codeBlock.Arguments)
+                            ? codeBlock.Info
+                            : codeBlock.Info + " " + codeBlock.Arguments;
+
+                        ParseQrInfoOptions(fullInfo, qrNode);
+                        return qrNode;
                     }
 
                     var codeNode = _nodeFactory.Create(
@@ -360,6 +427,45 @@ public sealed class MarkdigToNodeConverter
         }
     }
 
+    /// <summary>
+    /// 解析二维码围栏 info string 可选项（<c>```qrcode ecc=H border=4</c>）：
+    /// ecc（别名 level）仅 L/M/Q/H；border（别名 quiet/margin）仅 0–10。非法值忽略。
+    /// </summary>
+    private static void ParseQrInfoOptions(string? info, MarkdownNode qrNode)
+    {
+        if (string.IsNullOrWhiteSpace(info))
+            return;
+
+        var tokens = info.Trim()
+            .Split(InfoStringSeparators, StringSplitOptions.RemoveEmptyEntries);
+
+        // tokens[0] 是关键字本身（qrcode/qr），从其后解析
+        for (var i = 1; i < tokens.Length; i++)
+        {
+            var token = tokens[i];
+            var eqIndex = token.IndexOf('=');
+            if (eqIndex <= 0 || eqIndex >= token.Length - 1)
+                continue;
+
+            var key = token[..eqIndex];
+            var val = token[(eqIndex + 1)..];
+
+            if (key.Equals("ecc", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("level", StringComparison.OrdinalIgnoreCase))
+            {
+                if (val is "L" or "M" or "Q" or "H")
+                    qrNode.Attributes["qr-ecc"] = val.ToUpperInvariant();
+            }
+            else if (key.Equals("border", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("quiet", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("margin", StringComparison.OrdinalIgnoreCase))
+            {
+                if (int.TryParse(val, out var modules) && modules is >= 0 and <= 10)
+                    qrNode.Attributes["qr-border"] = modules.ToString();
+            }
+        }
+    }
+
     private void ProcessInlines(
         ContainerInline? container,
         MarkdownNode parentNode,
@@ -390,9 +496,16 @@ public sealed class MarkdigToNodeConverter
 
                 case EmphasisInline emphasis:
                     {
+                        // EmphasisExtras 行内扩展（与 MarkdownParser.UseEmphasisExtras 对应）：
+                        //   ~text~  下标 <sub>，~~text~~ 删除线 <del>
+                        //   ^text^  上标 <sup>，==text== 标记 <mark>，++text++ 插入 <ins>
                         var inlineType = emphasis.DelimiterChar switch
                         {
-                            '~' => NodeType.Delete,
+                            '~' when emphasis.DelimiterCount >= 2 => NodeType.Delete,
+                            '~' => NodeType.Subscript,
+                            '^' => NodeType.Superscript,
+                            '=' => NodeType.Marked,
+                            '+' => NodeType.Inserted,
                             '*' or '_' when emphasis.DelimiterCount >= 2 => NodeType.Strong,
                             '*' or '_' => NodeType.Emphasis,
                             _ => NodeType.Emphasis
@@ -496,19 +609,38 @@ public sealed class MarkdigToNodeConverter
                     break;
 
                 case FootnoteLink footnoteLink:
+                    // Markdig 会在脚注内容尾部自带返回链接（IsBackLink），
+                    // 锚点规则与本系统不一致；统一跳过，由脚注渲染按
+                    // backrefs 逐处追加，保证每处引用都有正确返回入口。
+                    if (footnoteLink.IsBackLink)
+                    {
+                        break;
+                    }
+
                     {
                         var linkNode = _nodeFactory.Create(
                             NodeType.FootnoteLink,
                             NodeCategory.Inline,
                             range: range);
 
-                        var indexValue = footnoteLink.Index;
-                        var indexText = indexValue.ToString();
+                        // 显示文本用脚注的原始标签；同一脚注的多次引用各自
+                        // 带唯一锚点（第 2 处起加序号后缀），href 指向同一脚注。
+                        var footnote = footnoteLink.Footnote;
+                        var label = ExtractFootnoteLabel(footnote.Label);
+                        var slug = BuildFootnoteSlug(label, footnote.Order);
+                        var occurrence = footnote.Links.IndexOf(footnoteLink);
+                        if (occurrence < 0)
+                        {
+                            occurrence = 0;
+                        }
 
-                        linkNode.Attributes["id"] = $"fnref-{indexText}";
-                        linkNode.Attributes["href"] = $"#fn-{indexText}";
-                        linkNode.Attributes["index"] = indexText;
-                        linkNode.Text = indexText;
+                        var anchor = BuildFootnoteRefAnchor(slug, occurrence);
+
+                        linkNode.Attributes["id"] = anchor;
+                        linkNode.Attributes["href"] = "#fn-" + slug;
+                        linkNode.Attributes["anchor"] = anchor;
+                        linkNode.Attributes["slug"] = slug;
+                        linkNode.Text = label;
 
                         parentNode.AddChild(linkNode);
                         break;
@@ -690,7 +822,15 @@ public sealed class MarkdigToNodeConverter
         int endLine = startLine;
         int endColumn = startColumn + length;
 
-        if (obj is LeafBlock leafBlock && leafBlock.Lines.Lines != null && leafBlock.Lines.Count > 0)
+        if (obj is ImageMatrixBlock { ClosingFenceLineIndex: >= 0 } matrixFence)
+        {
+            endLine = matrixFence.ClosingFenceLineIndex.Value + 1;
+        }
+        else if (obj is PoemBlock { ClosingFenceLineIndex: >= 0 } poemFence)
+        {
+            endLine = poemFence.ClosingFenceLineIndex.Value + 1;
+        }
+        else if (obj is LeafBlock leafBlock && leafBlock.Lines.Lines != null && leafBlock.Lines.Count > 0)
         {
             endLine = startLine + leafBlock.Lines.Count - 1;
             var lastSlice = leafBlock.Lines.Lines[leafBlock.Lines.Count - 1];
@@ -839,4 +979,195 @@ public sealed class MarkdigToNodeConverter
 
         return builder.ToString();
     }
+
+    /// <summary>
+    /// 把古诗块正文解析为可展开的虚拟子部件（标题/作者/朝代/体裁 +
+    /// 诗句组/诗句 + 出处/说明）。子节点 IsSynthetic、共享古诗块源码区间，
+    /// 仅承载各自 LocalStyle；解析规则与预览渲染保持一致。
+    /// </summary>
+    private void BuildPoemParts(MarkdownNode poemNode)
+    {
+        var normalized = (poemNode.Text ?? string.Empty).Replace("\r\n", "\n");
+
+        SplitPoemSections(normalized, out var metadataText, out var bodyText);
+        var metadata = ParsePoemMetadata(metadataText);
+        var partRange = poemNode.Range;
+
+        MarkdownNode CreatePart(NodeType type, NodeCategory category, string text)
+        {
+            var part = _nodeFactory.Create(type, category, text: text, range: partRange);
+            part.IsSynthetic = true;
+            return part;
+        }
+
+        void AddField(NodeType type, string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+                poemNode.AddChild(CreatePart(type, NodeCategory.Inline, value!));
+        }
+
+        AddField(NodeType.PoemTitle, GetMeta(metadata, "title"));
+        AddField(NodeType.PoemAuthor, GetMeta(metadata, "author"));
+        AddField(NodeType.PoemDynasty, GetMeta(metadata, "dynasty"));
+        AddField(NodeType.PoemForm, GetMeta(metadata, "form"));
+
+        var stanzaStarted = false;
+        MarkdownNode? stanza = null;
+        foreach (var raw in bodyText.Split('\n'))
+        {
+            if (raw.Length == 0)
+            {
+                stanzaStarted = false;
+                stanza = null;
+                continue;
+            }
+
+            if (!stanzaStarted)
+            {
+                stanza = CreatePart(NodeType.PoemStanza, NodeCategory.Container, string.Empty);
+                poemNode.AddChild(stanza);
+                stanzaStarted = true;
+            }
+
+            stanza!.AddChild(CreatePart(NodeType.PoemLine, NodeCategory.Inline, raw));
+        }
+
+        AddField(NodeType.PoemSource, GetMeta(metadata, "source"));
+        AddField(NodeType.PoemNote, GetMeta(metadata, "note"));
+    }
+
+    private static string? GetMeta(Dictionary<string, string> metadata, string key) =>
+        metadata.TryGetValue(key, out var value) ? value : null;
+
+    /// <summary>
+    /// 与预览渲染一致的元数据/正文切分：以首个单独的 "---" 行为界。
+    /// </summary>
+    private static void SplitPoemSections(
+        string normalized,
+        out string metadataText,
+        out string bodyText)
+    {
+        metadataText = string.Empty;
+        bodyText = string.Empty;
+
+        if (normalized.StartsWith("---\n", StringComparison.Ordinal))
+        {
+            bodyText = normalized.Substring(4);
+            return;
+        }
+
+        if (normalized == "---")
+            return;
+
+        var sepIdx = normalized.IndexOf("\n---\n", StringComparison.Ordinal);
+        if (sepIdx >= 0)
+        {
+            metadataText = normalized.Substring(0, sepIdx);
+            bodyText = normalized.Substring(sepIdx + 5);
+            return;
+        }
+
+        sepIdx = normalized.IndexOf("\n---", StringComparison.Ordinal);
+        if (sepIdx >= 0)
+        {
+            metadataText = normalized.Substring(0, sepIdx);
+            bodyText = sepIdx + 4 < normalized.Length
+                ? normalized.Substring(sepIdx + 4)
+                : string.Empty;
+            return;
+        }
+
+        bodyText = normalized;
+    }
+
+    private static Dictionary<string, string> ParsePoemMetadata(string metadataText)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(metadataText))
+            return result;
+
+        foreach (var raw in metadataText.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0)
+                continue;
+
+            var colonIdx = line.IndexOf(':');
+            if (colonIdx <= 0)
+                continue;
+
+            var key = line.Substring(0, colonIdx).Trim();
+            var value = line.Substring(colonIdx + 1).Trim();
+            if (key.Length > 0)
+                result[key] = value;
+        }
+
+        return result;
+    }
+
+    // ── 脚注标签 / slug ──────────────────────────────────────────────
+
+    // Markdig 的 Footnote.Label 带前导 '^'（如 "^42"），去掉它得到用户
+    // 原始标签，作为正文角标与脚注列表共同显示的文本。
+    private static string ExtractFootnoteLabel(string? markdigLabel)
+    {
+        var label = (markdigLabel ?? string.Empty).Trim();
+        if (label.Length > 0 && label[0] == '^')
+        {
+            label = label[1..];
+        }
+
+        return label.Length > 0 ? label : "note";
+    }
+
+    // 锚点 slug：Unicode 单词字符（含数字、CJK）与 '-' 保留，其余字符统一
+    // 替换为 '-'；发生过替换时追加脚注 Order 后缀以防不同标签撞 slug。
+    // 纯单词标签（绝大多数场景）无损直用。
+    private static string BuildFootnoteSlug(string label, int order)
+    {
+        var slug = new StringBuilder(label.Length);
+        var replaced = false;
+        foreach (var ch in label)
+        {
+            if (IsSlugChar(ch))
+            {
+                slug.Append(ch);
+            }
+            else
+            {
+                slug.Append('-');
+                replaced = true;
+            }
+        }
+
+        if (!replaced)
+        {
+            return slug.ToString();
+        }
+
+        slug.Append("-o").Append(order);
+        return slug.ToString();
+    }
+
+    private static bool IsSlugChar(char ch)
+    {
+        if (ch == '-')
+        {
+            return true;
+        }
+
+        var category = char.GetUnicodeCategory(ch);
+        return category
+            is UnicodeCategory.UppercaseLetter
+            or UnicodeCategory.LowercaseLetter
+            or UnicodeCategory.TitlecaseLetter
+            or UnicodeCategory.OtherLetter
+            or UnicodeCategory.DecimalDigitNumber
+            or UnicodeCategory.ConnectorPunctuation;
+    }
+
+    // 正文引用锚点：第 1 处 fnref-{slug}，第 2 处起 fnref-{slug}-{n+1}，
+    // 保证同一脚注多处引用时 HTML id 唯一、脚注返回链接各自可寻址。
+    private static string BuildFootnoteRefAnchor(string slug, int occurrence) =>
+        occurrence == 0 ? "fnref-" + slug : "fnref-" + slug + "-" + (occurrence + 1);
 }

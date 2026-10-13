@@ -36,7 +36,21 @@ public sealed class StyleResolver : IStyleResolver
 
             var result = new ComputedStyle();
 
+            // 优先级（低 → 高）：渲染器兜底 → 父链继承 → 类型/命名样式 → 节点自身。
+            // 即每个可继承属性：自身已定义用自身；否则沿父节点计算值向上查找；
+            // 整条链都未定义时才由渲染器 default 兜底。
+
+            // 1) 渲染器兜底：default 是最低优先级的后备值，可被任何祖先设置覆盖。
             result.Apply(_defaultDefinition!.Style);
+
+            // 2) 继承回退：父节点【计算值】中的可继承属性覆盖兜底。
+            //    父计算值已递归包含更上层祖先的 LocalStyle，因此列表/引用/表格等
+            //    任意祖先上设置的字体、字号、字重、字态、行高、文字色、对齐都会
+            //    沿树向下传递，直到被某层直接声明截断。
+            if (node.Parent is not null)
+            {
+                result.ApplyInheritable(Resolve(node.Parent));
+            }
 
             if (_typeStyles!.TryGetValue(node.Type, out var typeStyle))
             {
@@ -50,8 +64,7 @@ public sealed class StyleResolver : IStyleResolver
                 ApplyReferencedStyle(result, node.StyleId, visited);
             }
 
-            ApplySectionAncestorsStyle(result, node.Parent);
-
+            // 3) 节点自身 LocalStyle 优先级最高。
             result.Apply(node.LocalStyle);
 
             _cache.Set(node.Id, result);
@@ -142,20 +155,5 @@ public sealed class StyleResolver : IStyleResolver
             ApplyReferencedStyle(target, definition.ParentStyleId!, visited);
 
         target.Apply(definition.Style);
-    }
-
-    private static void ApplySectionAncestorsStyle(ComputedStyle target, MarkdownNode? parent)
-    {
-        if (parent is null) return;
-
-        if (parent.Parent is not null)
-        {
-            ApplySectionAncestorsStyle(target, parent.Parent);
-        }
-
-        if (parent.Type == NodeType.Section)
-        {
-            target.Apply(parent.LocalStyle);
-        }
     }
 }

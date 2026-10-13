@@ -1,11 +1,11 @@
-﻿using System;
+using System;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Editing;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Documents;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Editing.Commands;
 
-public sealed class TextReplaceCommand : IEditorCommand, IEditorCommandState
+public sealed class TextReplaceCommand : IEditorCommand, IEditorCommandState, IEditorCommandMemory
 {
     private readonly MarkdownDocument _document;
     private readonly IMarkdownEditApplier _editApplier;
@@ -64,4 +64,7 @@ public sealed class TextReplaceCommand : IEditorCommand, IEditorCommandState
         _editApplier.Apply(_document, restoredSource);
         HasChanges = true;
     }
+
+    public long EstimatedBytes =>
+        2L * (_oldText.Length + _newText.Length) + 256;
 }

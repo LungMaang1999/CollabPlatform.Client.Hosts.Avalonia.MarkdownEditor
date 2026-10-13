@@ -120,8 +120,12 @@ internal static class DocumentPackageMapper
             Italic = s.Italic,
             LineHeight = s.LineHeight,
             TextAlign = s.TextAlign,
+            VerticalAlign = s.VerticalAlign,
             BorderColor = s.BorderColor,
             BorderWidth = s.BorderWidth,
+            BorderRadius = s.BorderRadius,
+            Width = s.Width,
+            Gap = s.Gap,
             CustomCss = s.CustomCss,
             Margin = s.Margin is null ? null : new ThicknessValueDto
             {
@@ -156,8 +160,12 @@ internal static class DocumentPackageMapper
             Italic = dto.Italic,
             LineHeight = dto.LineHeight,
             TextAlign = dto.TextAlign,
+            VerticalAlign = dto.VerticalAlign,
             BorderColor = dto.BorderColor,
             BorderWidth = dto.BorderWidth ?? 0,
+            BorderRadius = dto.BorderRadius,
+            Width = dto.Width,
+            Gap = dto.Gap,
             CustomCss = dto.CustomCss
         };
 
