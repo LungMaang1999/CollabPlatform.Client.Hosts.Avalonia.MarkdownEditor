@@ -1025,59 +1025,8 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
 
     private void RenderImageMatrix(MarkdownNode node, StringBuilder html)
     {
-        var source = node.Text ?? string.Empty;
-        var lines = source.Replace("\r\n", "\n").Split('\n');
-
-        // 先按行收集格子，并统计“单行为最多图片数” N。图片格宽度恒按 N 等分；
-        // 文本格只以 auto 宽度吸收剩余空间（必要时自动折行），绝不挤压图片尺寸。
-        var rows = new List<List<string>>();
-        var currentRow = new List<string>();
-
-        foreach (var raw in lines)
-        {
-            var trimmed = raw.Trim();
-            if (trimmed.Length == 0)
-            {
-                if (currentRow.Count > 0)
-                {
-                    rows.Add(currentRow);
-                    currentRow = new List<string>();
-                }
-
-                continue;
-            }
-
-            // 围栏开/关标记行（'''image、''' 等）不是内容格，必须跳过。
-            if (trimmed.StartsWith("'''", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            currentRow.AddRange(SplitMatrixCells(trimmed));
-        }
-
-        if (currentRow.Count > 0)
-        {
-            rows.Add(currentRow);
-        }
-
-        var columnCount = 1;
-        foreach (var row in rows)
-        {
-            var imageCount = 0;
-            foreach (var cell in row)
-            {
-                if (IsSafeUrl(cell))
-                {
-                    imageCount++;
-                }
-            }
-
-            if (imageCount > columnCount)
-            {
-                columnCount = imageCount;
-            }
-        }
+        var rows = CollectMatrixRows(node);
+        var columnCount = CountMatrixColumns(rows);
 
         html.Append("<div class=\"image-matrix");
         if (node.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
@@ -1089,19 +1038,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
 
         // 格间距与对齐经自定义变量/单边外边距注入：--matrix-gap 贯通外层、行与图片格基准，
         // 对齐对替换型容器走 auto 外边距（见 BuildReplacedAlignment）。
-        var matrixResolved = _styleResolver.Resolve(node);
-        var matrixExtra = new StringBuilder($"--matrix-cols:{columnCount}");
-        if (matrixResolved.Gap is > 0)
-        {
-            matrixExtra.Append("; --matrix-gap:")
-                .Append(matrixResolved.Gap.Value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture))
-                .Append("px");
-        }
-        var matrixAlign = BuildReplacedAlignment(matrixResolved.TextAlign, forceBlockDisplay: false);
-        if (!string.IsNullOrEmpty(matrixAlign))
-            matrixExtra.Append("; ").Append(matrixAlign);
-
-        AppendStyle(node, html, matrixExtra.ToString());
+        AppendStyle(node, html, BuildMatrixExtraCss(node, columnCount));
         html.Append('>');
 
         foreach (var row in rows)
@@ -1503,16 +1440,145 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
 
     private void AppendStyle(MarkdownNode node, StringBuilder html, string? extraCss = null)
     {
-        var style = _styleResolver.Resolve(node);
-        var css = _cssStyleBuilder.Build(style);
-        if (!string.IsNullOrWhiteSpace(extraCss))
-        {
-            css = string.IsNullOrWhiteSpace(css) ? extraCss.Trim() : css + " " + extraCss.Trim();
-        }
+        var css = BuildNodeInlineCss(node, extraCss);
         if (!string.IsNullOrWhiteSpace(css))
         {
             html.Append(" style=\"").Append(WebUtility.HtmlEncode(css)).Append('"');
         }
+    }
+
+    /// <summary>
+    /// 节点当前样式对应的完整内联 CSS（含按块类型追加的变量/单边外边距），
+    /// 与全量帧写到该节点 style 属性上的内容逐字一致。无任何声明时返回 null。
+    /// </summary>
+    public string? BuildNodeInlineCss(MarkdownNode node) =>
+        BuildNodeInlineCss(node, BuildNodeExtraInlineCss(node));
+
+    private string? BuildNodeInlineCss(MarkdownNode node, string? extraCss)
+    {
+        var css = _cssStyleBuilder.Build(_styleResolver.Resolve(node));
+        if (!string.IsNullOrWhiteSpace(extraCss))
+        {
+            css = string.IsNullOrWhiteSpace(css) ? extraCss.Trim() : css + " " + extraCss.Trim();
+        }
+
+        return string.IsNullOrWhiteSpace(css) ? null : css;
+    }
+
+    /// <summary>
+    /// 各块类型在基础样式之外追加到同一 style 属性上的补充声明，分发条件必须与
+    /// <see cref="RenderNode"/> 的元素分支保持一致：局部 CSS 直写通道据此产出与
+    /// 全量帧完全相同的内联声明。
+    /// </summary>
+    private string? BuildNodeExtraInlineCss(MarkdownNode node)
+    {
+        switch (node.Type)
+        {
+            case NodeType.TableRow:
+                // tr 背景改写为 --row-bg 变量，由单元格底色规则消费。
+                return BuildTableRowCascadeVars(node);
+            case NodeType.MathBlock:
+                return BuildMathStyleVars(node);
+            case NodeType.Mermaid:
+            case NodeType.QrCode:
+                return ResolveReplacedAlignmentCss(node, forceBlockDisplay: false);
+            case NodeType.Image:
+                return ResolveReplacedAlignmentCss(node, forceBlockDisplay: true);
+            case NodeType.ImageMatrix:
+                return BuildMatrixExtraCss(node, CountMatrixColumns(CollectMatrixRows(node)));
+            case NodeType.Quote when node.Attributes.ContainsKey("admonition"):
+                return ResolveSemanticAccentCss(node, "--adm-accent");
+            case NodeType.Custom:
+                return ResolveSemanticAccentCss(node, "--cb-accent");
+            default:
+                return null;
+        }
+    }
+
+    // 先按行收集格子：图片格宽度恒按“单行最多图片数”N 等分；
+    // 文本格只以 auto 宽度吸收剩余空间（必要时自动折行），绝不挤压图片尺寸。
+    private static List<List<string>> CollectMatrixRows(MarkdownNode node)
+    {
+        var source = node.Text ?? string.Empty;
+        var lines = source.Replace("\r\n", "\n").Split('\n');
+
+        var rows = new List<List<string>>();
+        var currentRow = new List<string>();
+
+        foreach (var raw in lines)
+        {
+            var trimmed = raw.Trim();
+            if (trimmed.Length == 0)
+            {
+                if (currentRow.Count > 0)
+                {
+                    rows.Add(currentRow);
+                    currentRow = new List<string>();
+                }
+
+                continue;
+            }
+
+            // 围栏开/关标记行（'''image、''' 等）不是内容格，必须跳过。
+            if (trimmed.StartsWith("'''", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            currentRow.AddRange(SplitMatrixCells(trimmed));
+        }
+
+        if (currentRow.Count > 0)
+        {
+            rows.Add(currentRow);
+        }
+
+        return rows;
+    }
+
+    private static int CountMatrixColumns(List<List<string>> rows)
+    {
+        var columnCount = 1;
+        foreach (var row in rows)
+        {
+            var imageCount = 0;
+            foreach (var cell in row)
+            {
+                if (IsSafeUrl(cell))
+                {
+                    imageCount++;
+                }
+            }
+
+            if (imageCount > columnCount)
+            {
+                columnCount = imageCount;
+            }
+        }
+
+        return columnCount;
+    }
+
+    // 格间距与对齐经自定义变量/单边外边距注入：--matrix-gap 贯通外层、行与图片格基准，
+    // 对齐对替换型容器走 auto 外边距（见 BuildReplacedAlignment）。
+    private string BuildMatrixExtraCss(MarkdownNode node, int columnCount)
+    {
+        var resolved = _styleResolver.Resolve(node);
+        var matrixExtra = new StringBuilder("--matrix-cols:").Append(columnCount);
+        if (resolved.Gap is > 0)
+        {
+            matrixExtra.Append("; --matrix-gap:")
+                .Append(resolved.Gap.Value.ToString("0.##", CultureInfo.InvariantCulture))
+                .Append("px");
+        }
+
+        var matrixAlign = BuildReplacedAlignment(resolved.TextAlign, forceBlockDisplay: false);
+        if (!string.IsNullOrEmpty(matrixAlign))
+        {
+            matrixExtra.Append("; ").Append(matrixAlign);
+        }
+
+        return matrixExtra.ToString();
     }
 
     private string? ResolveReplacedAlignmentCss(MarkdownNode node, bool forceBlockDisplay)

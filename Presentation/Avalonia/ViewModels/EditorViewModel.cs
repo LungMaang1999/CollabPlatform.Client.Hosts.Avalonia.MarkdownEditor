@@ -165,6 +165,13 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         private set => SetField(ref _htmlPatch, value);
     }
 
+    /// <summary>
+    /// 样式提交后发布的局部 CSS 直写载荷：(节点 Id, 该节点当前完整内联 CSS)。
+    /// css 为 null 表示节点已无内联声明，预览应撤销此前的直写覆盖。
+    /// 消费端据此在 300ms 防抖全量帧落地前即时更新 DOM，全量帧到达后自然对齐。
+    /// </summary>
+    public event Action<string, string?>? NodeStyleInlineCssPublished;
+
     /// <summary>预览发布版本号：每次全量/补丁成功发布到 UI 时单调 +1。</summary>
     public long PublishedPreviewVersion => _publishedPreviewVersion;
 
@@ -1076,10 +1083,11 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         ArgumentNullException.ThrowIfNull(newStyle);
 
         var document = _activeDocument.Document;
+        MarkdownNode target;
 
         lock (document)
         {
-            var target = document.FindNode(node.Id) ?? node;
+            target = document.FindNode(node.Id) ?? node;
             if (StyleEquals(target.LocalStyle, newStyle)) return;
 
             var command = new ChangeStyleCommand(document, target, newStyle);
@@ -1088,10 +1096,30 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
             _activeDocument.NotifyNodeStyleChanged(target.Id);
         }
 
+        PublishNodeStyleInlineCss(target);
         ScheduleUpdatePreview();
         OnPropertyChanged(nameof(IsModified));
         OnPropertyChanged(nameof(CanUndo));
         OnPropertyChanged(nameof(CanRedo));
+    }
+
+    /// <summary>
+    /// 把提交后的节点内联 CSS 立即广播给预览（不等 300ms 全量帧）。直写只是
+    /// 全量帧落地前的加速预览，解析失败不影响权威帧，绝不抛出。
+    /// </summary>
+    private void PublishNodeStyleInlineCss(MarkdownNode node)
+    {
+        string? css;
+        try
+        {
+            css = _activeRenderer?.BuildNodeInlineCss(node);
+        }
+        catch
+        {
+            css = null;
+        }
+
+        NodeStyleInlineCssPublished?.Invoke(node.Id, css);
     }
 
     /// <summary>

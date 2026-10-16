@@ -16,14 +16,90 @@ public sealed class NodeIdentityMatcher : INodeIdentityMatcher
 
         var previousWrapper = GetSingleTransparentSection(previousRoot);
         var currentWrapper = GetSingleTransparentSection(currentRoot);
+        var context = new MatchContext();
         if (previousWrapper is not null && currentWrapper is not null)
         {
             TransferIdentity(previousWrapper, currentWrapper);
-            MatchNodeLists(previousWrapper.Children, currentWrapper.Children);
-            return;
+            MatchNodeLists(previousWrapper.Children, currentWrapper.Children, context);
+        }
+        else
+        {
+            MatchNodeLists(GetComparableChildren(previousRoot), GetComparableChildren(currentRoot), context);
         }
 
-        MatchNodeLists(GetComparableChildren(previousRoot), GetComparableChildren(currentRoot));
+        // 稳态编辑全部节点都能局部匹配，救援扫描（全树两趟）完全跳过；
+        // 只有重组类编辑产生未匹配节点时才支付扫描成本。
+        if (context.SawUnmatchedCurrent)
+        {
+            RescueOrphanedNodes(previousRoot, currentRoot);
+        }
+    }
+
+    // 跟踪本轮匹配是否有当前节点未找到旧节点（救援 pass 的启动条件）。
+    private sealed class MatchContext
+    {
+        public bool SawUnmatchedCurrent;
+    }
+
+    // 重组类编辑（标题升降级、段落套引用等）会改变节树嵌套，节点被移入不同父级后
+    // 局部匹配永远碰不到旧节点，身份丢失 = 样式与选区丢失。全树兜底：仅当
+    // 结构类型+文本 在新旧两侧都唯一时才转移身份，重复内容不抢，避免误配。
+    private static void RescueOrphanedNodes(MarkdownNode previousRoot, MarkdownNode currentRoot)
+    {
+        var currentIds = new HashSet<string>(StringComparer.Ordinal);
+        CollectIds(currentRoot, currentIds);
+
+        var lost = new Dictionary<(StructuralKey Key, string Text), List<MarkdownNode>>();
+        CollectIdentityLost(previousRoot, currentIds, lost);
+        if (lost.Count == 0)
+            return;
+
+        var previousIds = new HashSet<string>(StringComparer.Ordinal);
+        CollectIds(previousRoot, previousIds);
+
+        var fresh = new Dictionary<(StructuralKey Key, string Text), List<MarkdownNode>>();
+        CollectIdentityLost(currentRoot, previousIds, fresh);
+        if (fresh.Count == 0)
+            return;
+
+        foreach (var pair in fresh)
+        {
+            if (pair.Value.Count != 1)
+                continue;
+            if (!lost.TryGetValue(pair.Key, out var candidates) || candidates.Count != 1)
+                continue;
+
+            TransferState(candidates[0], pair.Value[0]);
+        }
+    }
+
+    private static void CollectIds(MarkdownNode node, HashSet<string> ids)
+    {
+        ids.Add(node.Id);
+        foreach (var child in node.Children)
+            CollectIds(child, ids);
+    }
+
+    // 收集"身份未延续到对面树"的内容节点，按 结构类型+文本 归桶。
+    // 文本为空无法可靠配对（Section 等容器 Text 为空），直接跳过。
+    private static void CollectIdentityLost(
+        MarkdownNode node,
+        HashSet<string> otherSideIds,
+        Dictionary<(StructuralKey Key, string Text), List<MarkdownNode>> bucket)
+    {
+        if (!otherSideIds.Contains(node.Id) && !string.IsNullOrEmpty(node.Text))
+        {
+            var key = (GetStructuralKey(node), node.Text);
+            if (!bucket.TryGetValue(key, out var list))
+            {
+                list = new List<MarkdownNode>();
+                bucket[key] = list;
+            }
+            list.Add(node);
+        }
+
+        foreach (var child in node.Children)
+            CollectIdentityLost(child, otherSideIds, bucket);
     }
 
     public void MatchSiblingLists(IList<MarkdownNode> previousTail, IList<MarkdownNode> currentTail)
@@ -31,21 +107,27 @@ public sealed class NodeIdentityMatcher : INodeIdentityMatcher
         ArgumentNullException.ThrowIfNull(previousTail);
         ArgumentNullException.ThrowIfNull(currentTail);
 
-        MatchNodeLists(previousTail, currentTail);
+        MatchNodeLists(previousTail, currentTail, null);
     }
 
     private static MarkdownNode? GetSingleTransparentSection(MarkdownNode root) =>
         root.Children.Count == 1 && IsTransparentSection(root.Children[0]) ? root.Children[0] : null;
 
-    private static void MatchNodeLists(IList<MarkdownNode> previousNodes, IList<MarkdownNode> currentNodes)
+    private static void MatchNodeLists(IList<MarkdownNode> previousNodes, IList<MarkdownNode> currentNodes, MatchContext? context)
     {
-        if (previousNodes.Count == 0 || currentNodes.Count == 0) return;
+        if (previousNodes.Count == 0 || currentNodes.Count == 0)
+        {
+            // 旧列表为空时当前列表全体都是新增节点，视为未匹配。
+            if (currentNodes.Count > 0 && context is not null)
+                context.SawUnmatchedCurrent = true;
+            return;
+        }
 
         if ((currentNodes.Count == 1 && IsTransparentSection(currentNodes[0]) && previousNodes.Count == 1 && previousNodes[0].Type == NodeType.Section) ||
             (previousNodes.Count == 1 && IsTransparentSection(previousNodes[0]) && currentNodes.Count == 1 && currentNodes[0].Type == NodeType.Section))
         {
             TransferState(previousNodes[0], currentNodes[0]);
-            MatchNodeLists(previousNodes[0].Children, currentNodes[0].Children);
+            MatchNodeLists(previousNodes[0].Children, currentNodes[0].Children, context);
             return;
         }
 
@@ -79,8 +161,11 @@ public sealed class NodeIdentityMatcher : INodeIdentityMatcher
         foreach (var match in matches)
         {
             TransferState(previousNodes[match.Value], currentNodes[match.Key]);
-            MatchNodeLists(previousNodes[match.Value].Children, currentNodes[match.Key].Children);
+            MatchNodeLists(previousNodes[match.Value].Children, currentNodes[match.Key].Children, context);
         }
+
+        if (context is not null && matches.Count < currentNodes.Count)
+            context.SawUnmatchedCurrent = true;
     }
 
     private static bool IsTransparentSection(MarkdownNode node) => node.Type == NodeType.Section && node.IsSynthetic && node.Level == 0;

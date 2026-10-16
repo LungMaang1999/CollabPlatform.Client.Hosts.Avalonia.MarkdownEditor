@@ -1,4 +1,4 @@
-﻿using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax;
 using System.Collections.ObjectModel;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Styling;
@@ -24,7 +24,7 @@ public sealed class StyleSheet
             AppliesTo = NodeType.Document,
             Style = new NodeStyle
             {
-                FontFamily = "Arial",
+                FontFamily = "Noto Sans SC",
                 FontSize = 14,
                 ForegroundColor = "#333333"
             }
