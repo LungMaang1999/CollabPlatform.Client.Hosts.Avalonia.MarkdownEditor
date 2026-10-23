@@ -328,6 +328,11 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
     }
 
     /// <summary>
+    /// 导出当前文档样式包 XML（.md.styles.xml 同格式）；无打开文档时返回空串。
+    /// </summary>
+    public string ExportStyleXml() => _documentService.ExportCurrentStyleXml();
+
+    /// <summary>
     /// 将当前文档的 Markdown 内容写入指定流（浏览器端另存通道），写完后
     /// 标记文档为已保存。调用方负责释放流。
     /// </summary>

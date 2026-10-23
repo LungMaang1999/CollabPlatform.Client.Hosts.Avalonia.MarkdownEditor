@@ -148,6 +148,27 @@ public sealed class FileService : IFileService
         return new DocumentLoadResult(document, Snapshot: null);
     }
 
+    /// <summary>
+    /// 内存导出样式包 XML（不落盘）：与保存 .md.styles.xml 同一序列化口径，
+    /// 供无文件路径场景（文章库样式持久化）取用。
+    /// </summary>
+    public string ExportStyleXml(MarkdownDocument document)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+
+        using var xmlStream = new MemoryStream();
+        lock (document)
+        {
+            var markdownBytes = Utf8Encoding.GetBytes(document.SourceMarkdown ?? string.Empty);
+            var sourceName = string.IsNullOrWhiteSpace(document.FilePath)
+                ? "document.md"
+                : Path.GetFileName(document.FilePath);
+            _serializer.Serialize(document, xmlStream, sourceName, ComputeSha256(markdownBytes));
+        }
+
+        return Utf8Encoding.GetString(xmlStream.ToArray());
+    }
+
     public async Task<DocumentFileSnapshot> SaveAsync(MarkdownDocument document, DocumentFileSnapshot? expectedSnapshot = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(document);

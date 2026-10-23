@@ -39,6 +39,13 @@ public static class MarkdownAttributes
         "poem-type",
         "poem-alias",
         "qr-ecc",
-        "qr-border"
+        "qr-border",
+        "timeline-time",
+        "timeline-tags",
+        "timeline-side",
+        "timeline-side-effective",
+        "timeline-layout",
+        "timeline-line",
+        "timeline-gap"
     };
 }

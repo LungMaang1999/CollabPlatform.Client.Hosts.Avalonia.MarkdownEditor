@@ -27,6 +27,10 @@ public interface IFileService
     /// <see cref="LoadFromText(string)"/>。文档同样无路径、无快照。
     /// </summary>
     DocumentLoadResult LoadFromText(string markdown, string? styleXml);
+
+    /// <summary>导出文档样式包 XML 文本（与 .md.styles.xml 同格式），无样式定制时仍返回完整包。</summary>
+    string ExportStyleXml(MarkdownDocument document);
+
     Task<DocumentFileSnapshot> SaveAsync(MarkdownDocument document, DocumentFileSnapshot? expectedSnapshot = null, CancellationToken cancellationToken = default);
     Task<string> ComputeHashAsync(string filePath, CancellationToken cancellationToken = default);
 }

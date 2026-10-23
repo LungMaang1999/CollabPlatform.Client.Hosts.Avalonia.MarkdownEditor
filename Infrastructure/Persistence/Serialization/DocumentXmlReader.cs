@@ -233,7 +233,7 @@ internal static class DocumentXmlReader
                 foreach (var a in attrs.Elements(nsLocal + "Attribute"))
                 {
                     var key = a.Attribute("Key")?.Value ?? string.Empty;
-                    var val = a.Attribute("Value")?.Value ?? string.Empty;
+                    var val = DocumentXmlWriter.DecodeValue(a.Attribute("Value")?.Value);
                     if (!string.IsNullOrEmpty(key)) node.Attributes[key] = val;
                 }
             }

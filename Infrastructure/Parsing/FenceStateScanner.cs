@@ -177,7 +177,7 @@ internal static class FenceStateScanner
             "ancient-poetry", "ancient-poem",
             "poetry", "poem", "verse",
             "shi", "ci", "qu",
-            "image", "img"
+            "image", "img", "timeline"
         };
 
         foreach (var kw in keywords)

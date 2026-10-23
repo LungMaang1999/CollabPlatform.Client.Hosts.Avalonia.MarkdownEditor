@@ -41,6 +41,10 @@ public interface IDocumentService
     /// 选择配对通道）。styleXml 为 null 时等价于纯文本载入。
     /// </summary>
     Task<MarkdownDocument> OpenFromTextAsync(string markdown, string? styleXml, CancellationToken cancellationToken = default);
+
+    /// <summary>导出当前文档的样式包 XML；无打开文档时返回空串。</summary>
+    string ExportCurrentStyleXml();
+
     Task SaveAsync(CancellationToken cancellationToken = default);
     Task SaveAsAsync(string filePath, CancellationToken cancellationToken = default);
 

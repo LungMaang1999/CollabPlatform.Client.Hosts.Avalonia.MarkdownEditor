@@ -18,10 +18,14 @@ public sealed class MarkdigToNodeConverter
     private static readonly char[] InfoStringSeparators = { ' ', '\t' };
 
     private readonly NodeFactory _nodeFactory;
+    private readonly Markdig.MarkdownPipeline? _pipeline;
 
-    public MarkdigToNodeConverter(NodeFactory? nodeFactory = null)
+    public MarkdigToNodeConverter(
+        NodeFactory? nodeFactory = null,
+        Markdig.MarkdownPipeline? pipeline = null)
     {
         _nodeFactory = nodeFactory ?? new NodeFactory();
+        _pipeline = pipeline;
     }
 
     public List<MarkdownNode> ConvertBlocks(
@@ -33,7 +37,7 @@ public sealed class MarkdigToNodeConverter
         ArgumentNullException.ThrowIfNull(diagnostics);
         ArgumentNullException.ThrowIfNull(source);
 
-        var resultNodes = ConvertChildren(rootContainer, diagnostics);
+        var resultNodes = ConvertChildren(rootContainer, diagnostics, source);
 
         // 先填充 RawMarkdown（未闭合 \[ 公式的判定要用），再标记流式半截块。
         var unclosedFenceStartLine = FenceStateScanner.FindTrailingUnclosedFenceStartLine(source);
@@ -52,7 +56,8 @@ public sealed class MarkdigToNodeConverter
         if (unclosedFenceStartLine.HasValue
             && node.Range.StartLine == unclosedFenceStartLine.Value
             && node.Type is NodeType.CodeBlock or NodeType.MathBlock or NodeType.Mermaid
-                or NodeType.ImageMatrix or NodeType.QrCode or NodeType.PoemBlock)
+                or NodeType.ImageMatrix or NodeType.QrCode or NodeType.PoemBlock
+                or NodeType.Timeline)
         {
             // 文档末尾未闭合围栏对应的代码/math 围栏/mermaid 块。
             node.Attributes[MarkdownAttributes.Unclosed] = "true";
@@ -82,7 +87,8 @@ public sealed class MarkdigToNodeConverter
 
     private List<MarkdownNode> ConvertChildren(
         ContainerBlock rootContainer,
-        ICollection<DiagnosticMessage> diagnostics)
+        ICollection<DiagnosticMessage> diagnostics,
+        string source)
     {
         var resultNodes = new List<MarkdownNode>();
 
@@ -90,7 +96,7 @@ public sealed class MarkdigToNodeConverter
         {
             try
             {
-                var node = ConvertBlock(block, diagnostics);
+                var node = ConvertBlock(block, diagnostics, source);
                 if (node is not null)
                 {
                     resultNodes.Add(node);
@@ -111,7 +117,10 @@ public sealed class MarkdigToNodeConverter
         return resultNodes;
     }
 
-    private MarkdownNode? ConvertBlock(Block block, ICollection<DiagnosticMessage> diagnostics)
+    private MarkdownNode? ConvertBlock(
+        Block block,
+        ICollection<DiagnosticMessage> diagnostics,
+        string source)
     {
         var range = ExtractSourceRange(block);
 
@@ -158,7 +167,7 @@ public sealed class MarkdigToNodeConverter
                         itemNode.Attributes["checked"] = isChecked ? "true" : "false";
                     }
 
-                    var itemChildren = ConvertChildren(listItem, diagnostics);
+                    var itemChildren = ConvertChildren(listItem, diagnostics, source);
                     foreach (var child in itemChildren)
                     {
                         itemNode.AddChild(child);
@@ -172,7 +181,7 @@ public sealed class MarkdigToNodeConverter
 
             case QuoteBlock quoteBlock:
                 var quoteNode = _nodeFactory.Create(NodeType.Quote, NodeCategory.Container, range: range);
-                var quoteChildren = ConvertChildren(quoteBlock, diagnostics);
+                var quoteChildren = ConvertChildren(quoteBlock, diagnostics, source);
                 foreach (var child in quoteChildren)
                 {
                     quoteNode.AddChild(child);
@@ -220,7 +229,7 @@ public sealed class MarkdigToNodeConverter
 
                         cellNode.IsTableHeader = rowBlock.IsHeader;
 
-                        var cellChildren = ConvertChildren(cellBlock, diagnostics);
+                        var cellChildren = ConvertChildren(cellBlock, diagnostics, source);
                         foreach (var child in cellChildren)
                         {
                             cellNode.AddChild(child);
@@ -276,7 +285,7 @@ public sealed class MarkdigToNodeConverter
 
                         footnoteNode.Attributes["backrefs"] = backrefAnchors.ToString();
 
-                        var children = ConvertChildren(footnoteBlock, diagnostics);
+                        var children = ConvertChildren(footnoteBlock, diagnostics, source);
                         foreach (var child in children)
                         {
                             footnoteNode.AddChild(child);
@@ -314,6 +323,9 @@ public sealed class MarkdigToNodeConverter
                     BuildPoemParts(poemNode);
                     return poemNode;
                 }
+
+            case TimelineBlock timelineBlock:
+                return BuildTimeline(timelineBlock, range, diagnostics, source);
 
             case FencedCodeBlock codeBlock:
                 {
@@ -463,6 +475,237 @@ public sealed class MarkdigToNodeConverter
                 if (int.TryParse(val, out var modules) && modules is >= 0 and <= 10)
                     qrNode.Attributes["qr-border"] = modules.ToString();
             }
+        }
+    }
+
+    // ── 时间线围栏展开 ────────────────────────────────────────────────
+
+    private sealed record TimelineItemScan(
+        TimelineMarkerInfo Info,
+        SourceRange Range,
+        string RawMarkdown,
+        int BodyStart,
+        int BodyLength,
+        int BodyStartLine);
+
+    /// <summary>
+    /// 把时间线围栏展开为 Timeline + TimelineItem 虚拟节点序列：@@ 行解析为
+    /// 时间/标签/侧别属性，节点正文递归走完整 Markdown 管线，局部坐标平移到全文。
+    /// </summary>
+    private MarkdownNode BuildTimeline(
+        TimelineBlock timelineBlock,
+        SourceRange range,
+        ICollection<DiagnosticMessage> diagnostics,
+        string source)
+    {
+        var timeline = _nodeFactory.Create(
+            NodeType.Timeline,
+            NodeCategory.Block,
+            text: timelineBlock.Lines.ToString().TrimEnd('\r', '\n'),
+            range: range);
+
+        var records = ScanTimelineItems(source, timelineBlock, range);
+
+        var hasExplicitSide = records.Exists(record => record.Info.Side is not null);
+        timeline.Attributes["timeline-layout"] = hasExplicitSide ? "axis" : "edge";
+
+        // 开围栏选项：line=solid|dashed、gap=2..24（仅虚线时落属性）
+        var fenceInfo = TimelineMarker.ParseFenceInfo(timelineBlock.Info);
+        if (fenceInfo.LineStyle == TimelineMarker.LineDashed)
+        {
+            timeline.Attributes["timeline-line"] = TimelineMarker.LineDashed;
+            if (fenceInfo.Gap is int gap)
+            {
+                timeline.Attributes["timeline-gap"] = gap.ToString();
+            }
+        }
+
+        for (var index = 0; index < records.Count; index++)
+        {
+            var record = records[index];
+            var effectiveSide = hasExplicitSide
+                ? record.Info.Side ?? (index % 2 == 0 ? "right" : "left")
+                : "right";
+
+            var item = _nodeFactory.Create(
+                NodeType.TimelineItem,
+                NodeCategory.Container,
+                text: record.Info.Time,
+                range: record.Range);
+            item.IsSynthetic = true;
+            item.RawMarkdown = record.RawMarkdown;
+            item.Attributes["timeline-time"] = record.Info.Time;
+            if (record.Info.Tags.Count > 0)
+            {
+                item.Attributes["timeline-tags"] = TimelineMarker.JoinTags(record.Info.Tags);
+            }
+            if (record.Info.Side is not null)
+            {
+                item.Attributes["timeline-side"] = record.Info.Side;
+            }
+            item.Attributes["timeline-side-effective"] = effectiveSide;
+
+            if (record.BodyLength > 0)
+            {
+                var bodyText = source.Substring(record.BodyStart, record.BodyLength);
+                var bodyDocument = _pipeline is null
+                    ? Markdig.Markdown.Parse(bodyText)
+                    : Markdig.Markdown.Parse(bodyText, _pipeline);
+
+                // 正文子树坐标相对节点正文切片，统一平移到全文。
+                var bodyNodes = ConvertBlocks(bodyDocument, diagnostics, bodyText);
+                var bodyLineDelta = record.BodyStartLine - 1;
+                foreach (var bodyNode in bodyNodes)
+                {
+                    ShiftTimelineBodyRange(bodyNode, record.BodyStart, bodyLineDelta);
+                    item.AddChild(bodyNode);
+                }
+            }
+
+            timeline.AddChild(item);
+        }
+
+        return timeline;
+    }
+
+    /// <summary>
+    /// 逐行扫描围栏体，定位每个 @@ 节点在全文源码中的区间以及正文切片坐标。
+    /// 未闭合围栏扫描到 EOF；首个 @@ 之前的杂散文本不产生节点。
+    /// 行级语法限制：正文代码块内若出现行首 "@@ " 也会被当作节点边界。
+    /// </summary>
+    private static List<TimelineItemScan> ScanTimelineItems(
+        string source,
+        TimelineBlock block,
+        SourceRange range)
+    {
+        var records = new List<TimelineItemScan>();
+
+        var pos = MoveToNextLine(source, range.StartOffset);
+        var lineIndex = block.Line + 1;
+
+        var markerStart = -1;
+        var markerLine = -1;
+        TimelineMarkerInfo? markerInfo = null;
+
+        void Finish(int itemEnd, int lastBodyLineIndex)
+        {
+            if (markerInfo is null || markerStart < 0)
+            {
+                return;
+            }
+
+            var rawEnd = itemEnd;
+            while (rawEnd > markerStart
+                && (source[rawEnd - 1] == '\n' || source[rawEnd - 1] == '\r'))
+            {
+                rawEnd--;
+            }
+
+            var rawMarkdown = source.Substring(markerStart, rawEnd - markerStart);
+
+            var bodyStart = 0;
+            var bodyLength = 0;
+            var bodyStartLine = markerLine + 2; // 1-based：标记行下一行为正文首行
+            var markerNewline = source.IndexOf('\n', markerStart);
+            if (markerNewline >= 0 && markerNewline + 1 < itemEnd)
+            {
+                bodyStart = markerNewline + 1;
+                bodyLength = itemEnd - bodyStart;
+                while (bodyLength > 0
+                    && (source[bodyStart + bodyLength - 1] == '\n'
+                        || source[bodyStart + bodyLength - 1] == '\r'))
+                {
+                    bodyLength--;
+                }
+            }
+
+            var column = 1;
+            for (var probe = markerStart; probe < rawEnd && source[probe] == ' '; probe++)
+            {
+                column++;
+            }
+
+            var itemRange = new SourceRange
+            {
+                StartOffset = markerStart,
+                Length = itemEnd - markerStart,
+                StartLine = markerLine + 1,
+                StartColumn = column,
+                EndLine = lastBodyLineIndex + 1,
+                EndColumn = 1
+            };
+
+            records.Add(new TimelineItemScan(
+                markerInfo, itemRange, rawMarkdown,
+                bodyStart, bodyLength, bodyStartLine));
+        }
+
+        while (pos <= source.Length)
+        {
+            var newlineIndex = source.IndexOf('\n', pos);
+            var lineEnd = newlineIndex < 0 ? source.Length : newlineIndex;
+            var contentEnd = lineEnd > pos && source[lineEnd - 1] == '\r' ? lineEnd - 1 : lineEnd;
+            var lineText = source.Substring(pos, contentEnd - pos);
+
+            var isClosing = block.ClosingFenceLineIndex.HasValue
+                && lineIndex == block.ClosingFenceLineIndex.Value;
+
+            if (isClosing)
+            {
+                Finish(pos, lineIndex - 1);
+                break;
+            }
+
+            if (TimelineMarker.IsMarkerLine(lineText))
+            {
+                // 上一节点正文止于本节点行首。
+                Finish(pos, lineIndex - 1);
+                markerStart = pos;
+                markerLine = lineIndex;
+                markerInfo = TimelineMarker.TryParse(lineText);
+            }
+
+            if (newlineIndex < 0)
+            {
+                Finish(source.Length, lineIndex);
+                break;
+            }
+
+            pos = newlineIndex + 1;
+            lineIndex++;
+        }
+
+        return records;
+    }
+
+    // 返回 fromOffset 所在行的下一行行首偏移。
+    private static int MoveToNextLine(string source, int fromOffset)
+    {
+        var newlineIndex = source.IndexOf('\n', fromOffset);
+        return newlineIndex < 0 ? source.Length : newlineIndex + 1;
+    }
+
+    // 时间线节点正文子树在正文切片内是局部坐标，统一平移为全文坐标。
+    private static void ShiftTimelineBodyRange(MarkdownNode node, int offsetDelta, int lineDelta)
+    {
+        var current = node.Range;
+        var hasRange = current.StartOffset != 0 || current.Length != 0 || current.StartLine > 1;
+        if (hasRange)
+        {
+            node.Range = new SourceRange
+            {
+                StartOffset = current.StartOffset + offsetDelta,
+                Length = current.Length,
+                StartLine = current.StartLine + lineDelta,
+                StartColumn = current.StartColumn,
+                EndLine = current.EndLine + lineDelta,
+                EndColumn = current.EndColumn
+            };
+        }
+
+        foreach (var child in node.Children)
+        {
+            ShiftTimelineBodyRange(child, offsetDelta, lineDelta);
         }
     }
 
@@ -829,6 +1072,10 @@ public sealed class MarkdigToNodeConverter
         else if (obj is PoemBlock { ClosingFenceLineIndex: >= 0 } poemFence)
         {
             endLine = poemFence.ClosingFenceLineIndex.Value + 1;
+        }
+        else if (obj is TimelineBlock { ClosingFenceLineIndex: >= 0 } timelineFence)
+        {
+            endLine = timelineFence.ClosingFenceLineIndex.Value + 1;
         }
         else if (obj is LeafBlock leafBlock && leafBlock.Lines.Lines != null && leafBlock.Lines.Count > 0)
         {

@@ -113,6 +113,12 @@ public sealed class DocumentService : IDocumentService, IDisposable
         }
     }
 
+    public string ExportCurrentStyleXml()
+    {
+        var doc = _currentDocument;
+        return doc is null ? string.Empty : _fileService.ExportStyleXml(doc);
+    }
+
     public async Task SaveAsync(CancellationToken cancellationToken = default)
     {
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);

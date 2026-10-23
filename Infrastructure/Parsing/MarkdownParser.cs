@@ -28,7 +28,6 @@ public sealed class MarkdownParser : IMarkdownParser
         _nodeFactory = nodeFactory ?? new NodeFactory();
         _sectionBuilder = sectionBuilder ?? new SectionBuilder(_nodeFactory);
         _identityMatcher = identityMatcher ?? new NodeIdentityMatcher();
-        _converter = new MarkdigToNodeConverter(_nodeFactory);
 
         var pipelineBuilder = new MarkdownPipelineBuilder();
         if (_options.EnablePipeTables) pipelineBuilder.UsePipeTables();
@@ -47,8 +46,12 @@ public sealed class MarkdownParser : IMarkdownParser
 
         pipelineBuilder.BlockParsers.Insert(0, new ImageMatrixFenceParser());
         pipelineBuilder.BlockParsers.Insert(0, new PoemFenceParser());
+        pipelineBuilder.BlockParsers.Insert(0, new TimelineFenceParser());
 
         _pipeline = pipelineBuilder.Build();
+
+        // 转换器需要 pipeline 以递归解析时间线节点正文。
+        _converter = new MarkdigToNodeConverter(_nodeFactory, _pipeline);
     }
 
     public ParseResult Parse(
@@ -602,7 +605,9 @@ public sealed class MarkdownParser : IMarkdownParser
         // 未闭合围栏一路吃到 EOF，其后任何编辑都可能改变跨度，直接全量。
         foreach (var block in oldBlocks)
         {
-            if ((block.Type == NodeType.CodeBlock || block.Type == NodeType.ImageMatrix || block.Type == NodeType.PoemBlock)
+            if ((block.Type == NodeType.CodeBlock || block.Type == NodeType.ImageMatrix
+                    || block.Type == NodeType.QrCode || block.Type == NodeType.PoemBlock
+                    || block.Type == NodeType.Timeline)
                 && block.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
             {
                 return false;
@@ -1001,9 +1006,15 @@ public sealed class MarkdownParser : IMarkdownParser
         foreach (var node in nodes)
         {
             if (node.Type == NodeType.CodeBlock
-                && node.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
+                || node.Type == NodeType.ImageMatrix
+                || node.Type == NodeType.QrCode
+                || node.Type == NodeType.PoemBlock
+                || node.Type == NodeType.Timeline)
             {
-                return true;
+                if (node.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
+                {
+                    return true;
+                }
             }
             if (ContainsUnclosedFence(node.Children)) return true;
         }

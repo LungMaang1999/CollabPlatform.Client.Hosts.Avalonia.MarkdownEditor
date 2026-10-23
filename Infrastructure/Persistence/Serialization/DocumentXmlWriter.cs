@@ -10,6 +10,80 @@ internal static class DocumentXmlWriter
 {
     private static string FormatInvariant(double value) => value.ToString("G", CultureInfo.InvariantCulture);
 
+    /// <summary>
+    /// 把 XML 1.0 不允许出现在属性值中的控制字符（如时间线标签分隔符 U+001F）
+    /// 可逆地编码为 \uXXXX，反斜杠本身转义为 \\。
+    /// </summary>
+    public static string EncodeValue(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return value ?? string.Empty;
+        }
+
+        var builder = new System.Text.StringBuilder(value.Length);
+        foreach (var c in value)
+        {
+            if (c == '\\')
+            {
+                builder.Append("\\\\");
+            }
+            else if (c < 0x20 && c is not ('\t' or '\n' or '\r'))
+            {
+                builder.Append("\\u");
+                builder.Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+            }
+            else
+            {
+                builder.Append(c);
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary><see cref="EncodeValue"/> 的逆运算；旧文件中不存在的反斜杠原样保留。</summary>
+    public static string DecodeValue(string? value)
+    {
+        if (string.IsNullOrEmpty(value) || value.IndexOf('\\') < 0)
+        {
+            return value ?? string.Empty;
+        }
+
+        var builder = new System.Text.StringBuilder(value.Length);
+        for (var i = 0; i < value.Length; i++)
+        {
+            var c = value[i];
+            if (c == '\\' && i + 1 < value.Length)
+            {
+                var next = value[i + 1];
+                if (next == '\\')
+                {
+                    builder.Append('\\');
+                    i++;
+                    continue;
+                }
+
+                if (next == 'u'
+                    && i + 5 < value.Length
+                    && int.TryParse(
+                        value.AsSpan(i + 2, 4),
+                        NumberStyles.HexNumber,
+                        CultureInfo.InvariantCulture,
+                        out var code))
+                {
+                    builder.Append((char)code);
+                    i += 5;
+                    continue;
+                }
+            }
+
+            builder.Append(c);
+        }
+
+        return builder.ToString();
+    }
+
     public static XDocument Write(DocumentPackageDto dto)
     {
         ArgumentNullException.ThrowIfNull(dto);
@@ -132,7 +206,7 @@ internal static class DocumentXmlWriter
                             new XElement(
                                 nsX + "Attribute",
                                 new XAttribute("Key", attribute.Key ?? string.Empty),
-                                new XAttribute("Value", attribute.Value ?? string.Empty)))));
+                                new XAttribute("Value", EncodeValue(attribute.Value))))));
             }
 
             if (node.Children.Count > 0)

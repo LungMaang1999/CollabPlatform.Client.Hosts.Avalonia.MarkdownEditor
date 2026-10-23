@@ -656,6 +656,14 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
                     RenderPoemBlock(node, html);
                     return;
 
+                case NodeType.Timeline:
+                    RenderTimeline(node, html, diagnostics);
+                    return;
+
+                case NodeType.TimelineItem:
+                    // 时间线节点只能经 RenderTimeline 统一布局输出，不允许独立成帧。
+                    return;
+
                 case NodeType.Custom:
                     RenderCustomBlock(node, html, diagnostics);
                     break;
@@ -1379,6 +1387,101 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         html.Append("</div>");
     }
 
+    // ── 时间线 ────────────────────────────────────────────────────────
+
+    private void RenderTimeline(
+        MarkdownNode node,
+        StringBuilder html,
+        List<DiagnosticMessage> diagnostics)
+    {
+        var layout = GetAttribute(node, "timeline-layout") is "axis" ? "axis" : "edge";
+        var items = node.Children
+            .Where(child => child.Type == NodeType.TimelineItem)
+            .ToList();
+
+        html.Append("<div class=\"md-timeline md-timeline-").Append(layout);
+        if (GetAttribute(node, "timeline-line") == "dashed")
+        {
+            html.Append(" md-timeline-line-dashed");
+        }
+
+        if (node.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
+        {
+            html.Append(" md-timeline-pending");
+        }
+        html.Append('"');
+        AppendNodeAttributes(node, html);
+        AppendStyle(node, html, BuildNodeExtraInlineCss(node));
+        html.Append('>');
+
+        if (items.Count == 0)
+        {
+            html.Append("<div class=\"md-tl-empty\">在 @@ 行添加时间节点，空行后书写正文</div>");
+        }
+        else
+        {
+            foreach (var item in items)
+            {
+                RenderTimelineItem(item, html, diagnostics);
+            }
+        }
+
+        html.Append("</div>");
+    }
+
+    private void RenderTimelineItem(
+        MarkdownNode item,
+        StringBuilder html,
+        List<DiagnosticMessage> diagnostics)
+    {
+        var side = GetAttribute(item, "timeline-side-effective") is "left" ? "left" : "right";
+
+        html.Append("<div class=\"md-tl-item\" data-side=\"").Append(side).Append('"');
+        AppendNodeAttributes(item, html);
+        AppendStyle(item, html);
+        html.Append('>');
+
+        // 轴轨与实心圆点；主轴竖线由容器伪元素统一绘制，保证跨节点连续。
+        html.Append("<div class=\"md-tl-rail\" aria-hidden=\"true\"><span class=\"md-tl-dot\"></span></div>");
+
+        html.Append("<div class=\"md-tl-meta\">");
+        var time = GetAttribute(item, "timeline-time");
+        if (string.IsNullOrEmpty(time))
+        {
+            html.Append("<time class=\"md-tl-time md-tl-time-empty\">未设置时间</time>");
+        }
+        else
+        {
+            html.Append("<time class=\"md-tl-time\">");
+            AppendEncoded(html, time);
+            html.Append("</time>");
+        }
+
+        var tags = TimelineMarker.SplitTags(
+            item.Attributes.TryGetValue("timeline-tags", out var tagValue) ? tagValue : null);
+        if (tags.Count > 0)
+        {
+            html.Append("<div class=\"md-tl-tags\">");
+            foreach (var tag in tags)
+            {
+                html.Append("<span class=\"md-tl-tag\">");
+                AppendEncoded(html, tag);
+                html.Append("</span>");
+            }
+            html.Append("</div>");
+        }
+        html.Append("</div>");
+
+        html.Append("<div class=\"md-tl-body\">");
+        foreach (var child in item.Children)
+        {
+            RenderNode(child, html, diagnostics);
+        }
+        html.Append("</div>");
+
+        html.Append("</div>");
+    }
+
     private void RenderLink(MarkdownNode node, StringBuilder html, List<DiagnosticMessage> diagnostics)
     {
         var url = GetAttribute(node, "url") ?? GetAttribute(node, "href");
@@ -1490,10 +1593,34 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
                 return ResolveSemanticAccentCss(node, "--adm-accent");
             case NodeType.Custom:
                 return ResolveSemanticAccentCss(node, "--cb-accent");
+            case NodeType.Timeline:
+                return BuildTimelineStyleVars(node);
             default:
                 return null;
         }
     }
+
+    // 虚线间隙由属性面板写入围栏 info（gap=），渲染为容器级 CSS 变量，
+    // 供主轴与短支线的 repeating-linear-gradient 消费。
+    private static string? BuildTimelineStyleVars(MarkdownNode node)
+    {
+        if (GetAttributeStatic(node, "timeline-line") != "dashed")
+        {
+            return null;
+        }
+
+        var gapText = GetAttributeStatic(node, "timeline-gap");
+        if (int.TryParse(gapText, out var gap)
+            && gap is >= TimelineMarker.MinLineGap and <= TimelineMarker.MaxLineGap)
+        {
+            return $"--tl-gap:{gap.ToString(CultureInfo.InvariantCulture)}px;";
+        }
+
+        return null;
+    }
+
+    private static string? GetAttributeStatic(MarkdownNode node, string key) =>
+        node.Attributes.TryGetValue(key, out var value) ? value : null;
 
     // 先按行收集格子：图片格宽度恒按“单行最多图片数”N 等分；
     // 文本格只以 auto 宽度吸收剩余空间（必要时自动折行），绝不挤压图片尺寸。
