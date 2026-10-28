@@ -204,6 +204,9 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         private set => SetField(ref _errorMessage, value);
     }
 
+    /// <summary>供外部（如宿主编辑器）上报操作错误，显示在状态栏。传 null 清除。</summary>
+    public void ReportError(string? message) => ErrorMessage = message;
+
     public CommandManager CommandManager => _commandManager;
     public SelectionService SelectionService { get; } = new();
     public bool CanUndo => _commandManager.CanUndo;
