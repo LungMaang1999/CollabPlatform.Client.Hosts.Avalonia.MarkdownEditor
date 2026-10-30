@@ -506,8 +506,8 @@ public sealed class MarkdigToNodeConverter
 
         var records = ScanTimelineItems(source, timelineBlock, range);
 
-        var hasExplicitSide = records.Exists(record => record.Info.Side is not null);
-        timeline.Attributes["timeline-layout"] = hasExplicitSide ? "axis" : "edge";
+        // 默认即中轴双列：侧别缺省的节点按序左右交替，与属性面板“自动”一致。
+        timeline.Attributes["timeline-layout"] = "axis";
 
         // 开围栏选项：line=solid|dashed、gap=2..24（仅虚线时落属性）
         var fenceInfo = TimelineMarker.ParseFenceInfo(timelineBlock.Info);
@@ -523,9 +523,7 @@ public sealed class MarkdigToNodeConverter
         for (var index = 0; index < records.Count; index++)
         {
             var record = records[index];
-            var effectiveSide = hasExplicitSide
-                ? record.Info.Side ?? (index % 2 == 0 ? "right" : "left")
-                : "right";
+            var effectiveSide = record.Info.Side ?? (index % 2 == 0 ? "right" : "left");
 
             var item = _nodeFactory.Create(
                 NodeType.TimelineItem,

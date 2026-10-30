@@ -78,13 +78,17 @@ internal static class DocumentPackageMapper
 
         static NodeDto ToNodeDto(MarkdownNode node)
         {
+            // 伴随样式文件只持久化样式；无样式数据的节点只需保留结构身份供匹配，
+            // 不携带 Text/RawMarkdown，避免把整篇 Markdown 正文复制进 XML。
+            var carriesSignature = NodeCarriesStyleData(node);
+
             var dto = new NodeDto
             {
                 Id = string.IsNullOrWhiteSpace(node.Id) ? Guid.NewGuid().ToString("N") : node.Id,
                 Type = node.Type.ToString(),
                 Category = node.Category.ToString(),
-                Text = node.Text ?? string.Empty,
-                RawMarkdown = node.RawMarkdown ?? string.Empty,
+                Text = carriesSignature ? node.Text ?? string.Empty : string.Empty,
+                RawMarkdown = carriesSignature ? node.RawMarkdown ?? string.Empty : string.Empty,
                 Level = node.Level,
                 StyleId = node.StyleId,
                 IsTableHeader = node.IsTableHeader,
@@ -94,7 +98,13 @@ internal static class DocumentPackageMapper
 
             if (node.Attributes is not null)
             {
-                foreach (var kv in node.Attributes) dto.Attributes[kv.Key] = kv.Value;
+                // 源码派生属性（language/href/index 等）重解析时自动生成，
+                // 不需要持久化；仅保留用户自定义属性供身份匹配还原。
+                foreach (var kv in node.Attributes)
+                {
+                    if (!MarkdownAttributes.SourceDerivedKeys.Contains(kv.Key))
+                        dto.Attributes[kv.Key] = kv.Value;
+                }
             }
 
             if (node.Children is not null)
@@ -104,6 +114,50 @@ internal static class DocumentPackageMapper
 
             return dto;
         }
+    }
+
+    // 节点是否携带需要持久化的样式数据：样式引用 / 局部样式 / 用户自定义属性。
+    // 仅这类节点需要保留 Text 与 RawMarkdown 作为身份匹配签名。
+    private static bool NodeCarriesStyleData(MarkdownNode node)
+    {
+        if (!string.IsNullOrWhiteSpace(node.StyleId))
+            return true;
+
+        if (NodeStyleHasData(node.LocalStyle))
+            return true;
+
+        if (node.Attributes is not null)
+        {
+            foreach (var key in node.Attributes.Keys)
+            {
+                if (!MarkdownAttributes.SourceDerivedKeys.Contains(key))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool NodeStyleHasData(NodeStyle? style)
+    {
+        if (style is null) return false;
+        return style.FontFamily is not null
+            || style.FontSize is not null
+            || style.ForegroundColor is not null
+            || style.BackgroundColor is not null
+            || style.Bold is not null
+            || style.Italic is not null
+            || style.LineHeight is not null
+            || style.TextAlign is not null
+            || style.VerticalAlign is not null
+            || style.Margin is not null
+            || style.Padding is not null
+            || style.BorderColor is not null
+            || style.BorderWidth is not null
+            || style.BorderRadius is not null
+            || style.Width is not null
+            || style.Gap is not null
+            || style.CustomCss is not null;
     }
 
     public static NodeStyleDto ToNodeStyleDto(NodeStyle? s)

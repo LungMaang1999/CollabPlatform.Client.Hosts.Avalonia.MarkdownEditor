@@ -80,6 +80,10 @@ public sealed class FileWatcherService : IFileWatcherService
                 catch (OperationCanceledException)
                 {
                 }
+                catch
+                {
+                    // 事件处理器抛异常不应导致未观察任务异常；文件监视是后台辅助功能。
+                }
             }, token);
         }
     }

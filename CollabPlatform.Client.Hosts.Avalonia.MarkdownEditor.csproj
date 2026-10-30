@@ -9,8 +9,8 @@
 
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="12.1.4" />
-    <PackageReference Include="Markdig" Version="1.4.2" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.13" />
+    <PackageReference Include="Markdig" Version="1.5.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.14" />
     <PackageReference Include="Net.Codecrete.QrCodeGenerator" Version="3.2.1" />
   </ItemGroup>
 
@@ -18,7 +18,9 @@
     <Folder Include="Application\Styling\" />
   </ItemGroup>
 
+  <!-- tests/ 目录存放独立测试工程源码，主工程不参与编译。 -->
   <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
     <InternalsVisibleTo Include="CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Tests" />
   </ItemGroup>
 

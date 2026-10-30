@@ -9,6 +9,67 @@ namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Per
 
 internal static class DocumentXmlReader
 {
+    // 读取标量值：优先属性，回退到同名子元素（兼容旧版 XML）。
+    private static string? AttrOrElement(XElement el, XNamespace ns, string name) =>
+        el.Attribute(name)?.Value ?? el.Element(ns + name)?.Value;
+
+    // 解析 "l,t,r,b" 简写；旧版用 Left/Top/Right/Bottom 四个子元素，两端兼容。
+    private static ThicknessValueDto? ReadThickness(XElement parent, XNamespace ns, string name)
+    {
+        var shorthand = parent.Attribute(name)?.Value;
+        if (!string.IsNullOrEmpty(shorthand))
+        {
+            var parts = shorthand.Split(',');
+            if (parts.Length == 4)
+            {
+                return new ThicknessValueDto
+                {
+                    Left = TryParseDouble(parts[0]) ?? 0,
+                    Top = TryParseDouble(parts[1]) ?? 0,
+                    Right = TryParseDouble(parts[2]) ?? 0,
+                    Bottom = TryParseDouble(parts[3]) ?? 0
+                };
+            }
+        }
+
+        var container = parent.Element(ns + name);
+        if (container is null) return null;
+
+        return new ThicknessValueDto
+        {
+            Left = TryParseDouble(container.Element(ns + "Left")?.Value) ?? 0,
+            Top = TryParseDouble(container.Element(ns + "Top")?.Value) ?? 0,
+            Right = TryParseDouble(container.Element(ns + "Right")?.Value) ?? 0,
+            Bottom = TryParseDouble(container.Element(ns + "Bottom")?.Value) ?? 0
+        };
+    }
+
+    // 从元素读取 NodeStyleDto：字段全部优先走属性，回退到子元素。
+    private static NodeStyleDto ReadStyleDto(XElement el, XNamespace ns)
+    {
+        var dto = new NodeStyleDto
+        {
+            FontFamily = AttrOrElement(el, ns, "FontFamily"),
+            FontSize = TryParseDouble(AttrOrElement(el, ns, "FontSize")),
+            ForegroundColor = AttrOrElement(el, ns, "ForegroundColor"),
+            BackgroundColor = AttrOrElement(el, ns, "BackgroundColor"),
+            Bold = TryParseBool(AttrOrElement(el, ns, "Bold")),
+            Italic = TryParseBool(AttrOrElement(el, ns, "Italic")),
+            LineHeight = TryParseDouble(AttrOrElement(el, ns, "LineHeight")),
+            TextAlign = AttrOrElement(el, ns, "TextAlign"),
+            VerticalAlign = AttrOrElement(el, ns, "VerticalAlign"),
+            BorderColor = AttrOrElement(el, ns, "BorderColor"),
+            BorderWidth = TryParseDouble(AttrOrElement(el, ns, "BorderWidth")),
+            BorderRadius = TryParseDouble(AttrOrElement(el, ns, "BorderRadius")),
+            Width = TryParseDouble(AttrOrElement(el, ns, "Width")),
+            Gap = TryParseDouble(AttrOrElement(el, ns, "Gap")),
+            CustomCss = AttrOrElement(el, ns, "CustomCss"),
+            Margin = ReadThickness(el, ns, "Margin"),
+            Padding = ReadThickness(el, ns, "Padding")
+        };
+        return dto;
+    }
+
     public static DocumentPackageDto Read(XDocument document)
     {
         ArgumentNullException.ThrowIfNull(document);
@@ -19,8 +80,8 @@ internal static class DocumentXmlReader
 
         var dto = new DocumentPackageDto
         {
-            SchemaVersion = root.Element(nsX + "SchemaVersion")?.Value ?? SchemaMigrator.CurrentSchemaVersion,
-            EditorVersion = root.Element(nsX + "EditorVersion")?.Value ?? SchemaMigrator.CurrentEditorVersion
+            SchemaVersion = AttrOrElement(root, nsX, "SchemaVersion") ?? SchemaMigrator.CurrentSchemaVersion,
+            EditorVersion = AttrOrElement(root, nsX, "EditorVersion") ?? SchemaMigrator.CurrentEditorVersion
         };
 
         var docEl = root.Element(nsX + "Document");
@@ -28,17 +89,20 @@ internal static class DocumentXmlReader
 
         var docDto = new DocumentDto
         {
-            Id = docEl.Element(nsX + "Id")?.Value ?? string.Empty,
-            FileName = docEl.Element(nsX + "FileName")?.Value ?? string.Empty
+            Id = docEl.Attribute("Id")?.Value ?? docEl.Element(nsX + "Id")?.Value ?? string.Empty,
+            FileName = docEl.Attribute("FileName")?.Value ?? docEl.Element(nsX + "FileName")?.Value ?? string.Empty
         };
 
-        var src = docEl.Element(nsX + "Source");
-        if (src is not null)
-        {
-            docDto.Source.Path = src.Element(nsX + "Path")?.Value ?? string.Empty;
-            docDto.Source.Hash = src.Element(nsX + "Hash")?.Value ?? string.Empty;
-            docDto.Source.Encoding = src.Element(nsX + "Encoding")?.Value ?? "utf-8";
-        }
+        // Source：新版用 SourcePath/SourceHash/SourceEncoding 属性，旧版用 <Source> 子元素。
+        docDto.Source.Path = docEl.Attribute("SourcePath")?.Value
+            ?? docEl.Element(nsX + "Source")?.Element(nsX + "Path")?.Value
+            ?? string.Empty;
+        docDto.Source.Hash = docEl.Attribute("SourceHash")?.Value
+            ?? docEl.Element(nsX + "Source")?.Element(nsX + "Hash")?.Value
+            ?? string.Empty;
+        docDto.Source.Encoding = docEl.Attribute("SourceEncoding")?.Value
+            ?? docEl.Element(nsX + "Source")?.Element(nsX + "Encoding")?.Value
+            ?? "utf-8";
 
         var stylesEl = docEl.Element(nsX + "Styles");
         if (stylesEl is not null)
@@ -49,57 +113,14 @@ internal static class DocumentXmlReader
                 {
                     Id = sEl.Attribute("Id")?.Value ?? string.Empty,
                     Name = sEl.Attribute("Name")?.Value ?? string.Empty,
-                    ParentStyleId = sEl.Element(nsX + "ParentStyleId")?.Value,
-                    AppliesTo = sEl.Element(nsX + "AppliesTo")?.Value
+                    ParentStyleId = AttrOrElement(sEl, nsX, "ParentStyleId"),
+                    AppliesTo = AttrOrElement(sEl, nsX, "AppliesTo")
                 };
 
                 var valueEl = sEl.Element(nsX + "StyleValue");
                 if (valueEl is not null)
                 {
-                    var nd = new NodeStyleDto
-                    {
-                        FontFamily = valueEl.Element(nsX + "FontFamily")?.Value,
-                        FontSize = TryParseDouble(valueEl.Element(nsX + "FontSize")?.Value),
-                        ForegroundColor = valueEl.Element(nsX + "ForegroundColor")?.Value,
-                        BackgroundColor = valueEl.Element(nsX + "BackgroundColor")?.Value,
-                        Bold = TryParseBool(valueEl.Element(nsX + "Bold")?.Value),
-                        Italic = TryParseBool(valueEl.Element(nsX + "Italic")?.Value),
-                        LineHeight = TryParseDouble(valueEl.Element(nsX + "LineHeight")?.Value),
-                        TextAlign = valueEl.Element(nsX + "TextAlign")?.Value,
-                        VerticalAlign = valueEl.Element(nsX + "VerticalAlign")?.Value,
-                        BorderColor = valueEl.Element(nsX + "BorderColor")?.Value,
-                        BorderWidth = TryParseDouble(valueEl.Element(nsX + "BorderWidth")?.Value),
-                        BorderRadius = TryParseDouble(valueEl.Element(nsX + "BorderRadius")?.Value),
-                        Width = TryParseDouble(valueEl.Element(nsX + "Width")?.Value),
-                        Gap = TryParseDouble(valueEl.Element(nsX + "Gap")?.Value),
-                        CustomCss = valueEl.Element(nsX + "CustomCss")?.Value
-                    };
-
-                    var mEl = valueEl.Element(nsX + "Margin");
-                    if (mEl is not null)
-                    {
-                        nd.Margin = new ThicknessValueDto
-                        {
-                            Left = TryParseDouble(mEl.Element(nsX + "Left")?.Value) ?? 0,
-                            Top = TryParseDouble(mEl.Element(nsX + "Top")?.Value) ?? 0,
-                            Right = TryParseDouble(mEl.Element(nsX + "Right")?.Value) ?? 0,
-                            Bottom = TryParseDouble(mEl.Element(nsX + "Bottom")?.Value) ?? 0
-                        };
-                    }
-
-                    var pEl = valueEl.Element(nsX + "Padding");
-                    if (pEl is not null)
-                    {
-                        nd.Padding = new ThicknessValueDto
-                        {
-                            Left = TryParseDouble(pEl.Element(nsX + "Left")?.Value) ?? 0,
-                            Top = TryParseDouble(pEl.Element(nsX + "Top")?.Value) ?? 0,
-                            Right = TryParseDouble(pEl.Element(nsX + "Right")?.Value) ?? 0,
-                            Bottom = TryParseDouble(pEl.Element(nsX + "Bottom")?.Value) ?? 0
-                        };
-                    }
-
-                    s.Style = nd;
+                    s.Style = ReadStyleDto(valueEl, nsX);
                 }
 
                 docDto.Styles.Add(s);
@@ -115,16 +136,26 @@ internal static class DocumentXmlReader
         {
             var es = new EditorStateDto
             {
-                SelectedNodeId = esEl.Element(nsX + "SelectedNodeId")?.Value,
-                CaretOffset = TryParseInt(esEl.Element(nsX + "CaretOffset")?.Value) ?? 0,
-                SelectionLength = TryParseInt(esEl.Element(nsX + "SelectionLength")?.Value) ?? 0
+                SelectedNodeId = AttrOrElement(esEl, nsX, "SelectedNodeId"),
+                CaretOffset = TryParseInt(AttrOrElement(esEl, nsX, "CaretOffset")) ?? 0,
+                SelectionLength = TryParseInt(AttrOrElement(esEl, nsX, "SelectionLength")) ?? 0
             };
 
-            var expanded = esEl.Element(nsX + "ExpandedNodeIds");
-            if (expanded is not null)
+            // 展开节点：新版空格分隔属性，旧版 <ExpandedNodeIds><Id>...</Id></ExpandedNodeIds>
+            var expandedAttr = esEl.Attribute("ExpandedNodeIds")?.Value;
+            if (!string.IsNullOrWhiteSpace(expandedAttr))
             {
-                foreach (var id in expanded.Elements(nsX + "Id").Select(x => x.Value))
+                foreach (var id in expandedAttr.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                     es.ExpandedNodeIds.Add(id);
+            }
+            else
+            {
+                var expanded = esEl.Element(nsX + "ExpandedNodeIds");
+                if (expanded is not null)
+                {
+                    foreach (var id in expanded.Elements(nsX + "Id").Select(x => x.Value))
+                        es.ExpandedNodeIds.Add(id);
+                }
             }
 
             docDto.EditorState = es;
@@ -135,12 +166,12 @@ internal static class DocumentXmlReader
         {
             var md = new MetadataDto
             {
-                Title = mdEl.Element(nsX + "Title")?.Value ?? string.Empty,
-                Author = mdEl.Element(nsX + "Author")?.Value ?? string.Empty,
-                Language = mdEl.Element(nsX + "Language")?.Value ?? "en",
-                Encoding = mdEl.Element(nsX + "Encoding")?.Value ?? "utf-8",
-                CreatedUtc = TryParseDateTime(mdEl.Element(nsX + "CreatedUtc")?.Value) ?? DateTime.UtcNow,
-                ModifiedUtc = TryParseDateTime(mdEl.Element(nsX + "ModifiedUtc")?.Value) ?? DateTime.UtcNow
+                Title = AttrOrElement(mdEl, nsX, "Title") ?? string.Empty,
+                Author = AttrOrElement(mdEl, nsX, "Author") ?? string.Empty,
+                Language = AttrOrElement(mdEl, nsX, "Language") ?? "en",
+                Encoding = AttrOrElement(mdEl, nsX, "Encoding") ?? "utf-8",
+                CreatedUtc = TryParseDateTime(AttrOrElement(mdEl, nsX, "CreatedUtc")) ?? DateTime.UtcNow,
+                ModifiedUtc = TryParseDateTime(AttrOrElement(mdEl, nsX, "ModifiedUtc")) ?? DateTime.UtcNow
             };
 
             var propsEl = mdEl.Element(nsX + "Properties");
@@ -172,58 +203,16 @@ internal static class DocumentXmlReader
 
             node.Text = el.Element(nsLocal + "Text")?.Value ?? string.Empty;
             node.RawMarkdown = el.Element(nsLocal + "RawMarkdown")?.Value ?? string.Empty;
-            node.Level = TryParseInt(el.Element(nsLocal + "Level")?.Value);
 
-            node.StyleId = el.Element(nsLocal + "StyleId")?.Value;
-            node.IsTableHeader = el.Element(nsLocal + "IsTableHeader")?.Value == "1";
+            // 标量字段：新版写在属性上，旧版写在子元素里，两端兼容。
+            node.Level = TryParseInt(el.Attribute("Level")?.Value ?? el.Element(nsLocal + "Level")?.Value);
+            node.StyleId = el.Attribute("StyleId")?.Value ?? el.Element(nsLocal + "StyleId")?.Value;
+            node.IsTableHeader = (el.Attribute("IsTableHeader")?.Value ?? el.Element(nsLocal + "IsTableHeader")?.Value) == "1";
 
             var localStyleEl = el.Element(nsLocal + "LocalStyle");
             if (localStyleEl is not null)
             {
-                var nsDto = new NodeStyleDto
-                {
-                    FontFamily = localStyleEl.Element(nsLocal + "FontFamily")?.Value,
-                    FontSize = TryParseDouble(localStyleEl.Element(nsLocal + "FontSize")?.Value),
-                    ForegroundColor = localStyleEl.Element(nsLocal + "ForegroundColor")?.Value,
-                    BackgroundColor = localStyleEl.Element(nsLocal + "BackgroundColor")?.Value,
-                    Bold = TryParseBool(localStyleEl.Element(nsLocal + "Bold")?.Value),
-                    Italic = TryParseBool(localStyleEl.Element(nsLocal + "Italic")?.Value),
-                    LineHeight = TryParseDouble(localStyleEl.Element(nsLocal + "LineHeight")?.Value),
-                    TextAlign = localStyleEl.Element(nsLocal + "TextAlign")?.Value,
-                    VerticalAlign = localStyleEl.Element(nsLocal + "VerticalAlign")?.Value,
-                    BorderColor = localStyleEl.Element(nsLocal + "BorderColor")?.Value,
-                    BorderWidth = TryParseDouble(localStyleEl.Element(nsLocal + "BorderWidth")?.Value),
-                    BorderRadius = TryParseDouble(localStyleEl.Element(nsLocal + "BorderRadius")?.Value),
-                    Width = TryParseDouble(localStyleEl.Element(nsLocal + "Width")?.Value),
-                    Gap = TryParseDouble(localStyleEl.Element(nsLocal + "Gap")?.Value),
-                    CustomCss = localStyleEl.Element(nsLocal + "CustomCss")?.Value
-                };
-
-                var mEl = localStyleEl.Element(nsLocal + "Margin");
-                if (mEl is not null)
-                {
-                    nsDto.Margin = new ThicknessValueDto
-                    {
-                        Left = TryParseDouble(mEl.Element(nsLocal + "Left")?.Value) ?? 0,
-                        Top = TryParseDouble(mEl.Element(nsLocal + "Top")?.Value) ?? 0,
-                        Right = TryParseDouble(mEl.Element(nsLocal + "Right")?.Value) ?? 0,
-                        Bottom = TryParseDouble(mEl.Element(nsLocal + "Bottom")?.Value) ?? 0
-                    };
-                }
-
-                var pEl = localStyleEl.Element(nsLocal + "Padding");
-                if (pEl is not null)
-                {
-                    nsDto.Padding = new ThicknessValueDto
-                    {
-                        Left = TryParseDouble(pEl.Element(nsLocal + "Left")?.Value) ?? 0,
-                        Top = TryParseDouble(pEl.Element(nsLocal + "Top")?.Value) ?? 0,
-                        Right = TryParseDouble(pEl.Element(nsLocal + "Right")?.Value) ?? 0,
-                        Bottom = TryParseDouble(pEl.Element(nsLocal + "Bottom")?.Value) ?? 0
-                    };
-                }
-
-                node.LocalStyle = nsDto;
+                node.LocalStyle = ReadStyleDto(localStyleEl, nsLocal);
             }
 
             node.Attributes.Clear();
@@ -247,23 +236,23 @@ internal static class DocumentXmlReader
 
             return node;
         }
-
-        static double? TryParseDouble(string? s) =>
-            double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : null;
-
-        static int? TryParseInt(string? s) =>
-            int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : null;
-
-        static bool? TryParseBool(string? s) => s switch
-        {
-            "1" => true,
-            "0" => false,
-            "true" or "True" => true,
-            "false" or "False" => false,
-            _ => null
-        };
-
-        static DateTime? TryParseDateTime(string? s) =>
-            DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dt) ? dt : null;
     }
+
+    private static double? TryParseDouble(string? s) =>
+        double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : null;
+
+    private static int? TryParseInt(string? s) =>
+        int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : null;
+
+    private static bool? TryParseBool(string? s) => s switch
+    {
+        "1" => true,
+        "0" => false,
+        "true" or "True" => true,
+        "false" or "False" => false,
+        _ => null
+    };
+
+    private static DateTime? TryParseDateTime(string? s) =>
+        DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dt) ? dt : null;
 }

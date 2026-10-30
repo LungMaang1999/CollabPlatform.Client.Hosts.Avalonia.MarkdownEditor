@@ -169,6 +169,9 @@ public sealed class MarkdownParser : IMarkdownParser
         const int maxWalkBack = 8;
         var lowest = Math.Max(1, cutBlockIndex - maxWalkBack + 1);
 
+        // previousSource 在回退循环中不变，引用定义扫描只做一次。
+        var previousHasReferenceDef = ReferenceDefinitionLineRegex.IsMatch(previousSource);
+
         for (var k = cutBlockIndex; k >= lowest; k--)
         {
             var anchor = previousBlocks[k];
@@ -202,8 +205,7 @@ public sealed class MarkdownParser : IMarkdownParser
 
             // 引用定义是文档级解析：重解析区出现 [ 或区内新定义可能影响区外，
             // 区域无法自给自足时扩大区域，最终走全量。
-            if (ReferenceDefinitionLineRegex.IsMatch(previousSource)
-                && probeText.IndexOf('[') >= 0)
+            if (previousHasReferenceDef && probeText.IndexOf('[') >= 0)
             {
                 continue;
             }

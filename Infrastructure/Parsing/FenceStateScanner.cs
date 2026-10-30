@@ -170,17 +170,17 @@ internal static class FenceStateScanner
         return true;
     }
 
+    private static readonly string[] CustomFenceKeywords =
+    {
+        "ancient-poetry", "ancient-poem",
+        "poetry", "poem", "verse",
+        "shi", "ci", "qu",
+        "image", "img", "timeline"
+    };
+
     private static bool IsCustomFenceKeyword(string text)
     {
-        var keywords = new[]
-        {
-            "ancient-poetry", "ancient-poem",
-            "poetry", "poem", "verse",
-            "shi", "ci", "qu",
-            "image", "img", "timeline"
-        };
-
-        foreach (var kw in keywords)
+        foreach (var kw in CustomFenceKeywords)
         {
             if (text.StartsWith(kw, StringComparison.OrdinalIgnoreCase))
             {

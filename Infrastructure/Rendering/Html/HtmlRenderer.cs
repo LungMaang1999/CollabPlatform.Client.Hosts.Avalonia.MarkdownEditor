@@ -1274,13 +1274,24 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
     {
         // 子部件由转换器解析为虚拟节点，这里按固定布局遍历，
         // 并把各自 LocalStyle 落到对应元素（无样式时 AppendStyle 输出空）。
-        var titleNode = node.Children.FirstOrDefault(c => c.Type == NodeType.PoemTitle);
-        var authorNode = node.Children.FirstOrDefault(c => c.Type == NodeType.PoemAuthor);
-        var dynastyNode = node.Children.FirstOrDefault(c => c.Type == NodeType.PoemDynasty);
-        var formNode = node.Children.FirstOrDefault(c => c.Type == NodeType.PoemForm);
-        var sourceNode = node.Children.FirstOrDefault(c => c.Type == NodeType.PoemSource);
-        var noteNode = node.Children.FirstOrDefault(c => c.Type == NodeType.PoemNote);
-        var stanzas = node.Children.Where(c => c.Type == NodeType.PoemStanza).ToList();
+        MarkdownNode? titleNode = null, authorNode = null, dynastyNode = null,
+            formNode = null, sourceNode = null, noteNode = null;
+        var stanzas = new List<MarkdownNode>();
+
+        // 单趟拆分各类子部件，避免 6 次 FirstOrDefault + 1 次 Where().ToList()。
+        foreach (var child in node.Children)
+        {
+            switch (child.Type)
+            {
+                case NodeType.PoemTitle: titleNode ??= child; break;
+                case NodeType.PoemAuthor: authorNode ??= child; break;
+                case NodeType.PoemDynasty: dynastyNode ??= child; break;
+                case NodeType.PoemForm: formNode ??= child; break;
+                case NodeType.PoemSource: sourceNode ??= child; break;
+                case NodeType.PoemNote: noteNode ??= child; break;
+                case NodeType.PoemStanza: stanzas.Add(child); break;
+            }
+        }
 
         html.Append("<div class=\"poem-block");
         if (node.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
@@ -1347,8 +1358,10 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
             AppendStyle(stanza, html);
             html.Append('>');
 
-            foreach (var line in stanza.Children.Where(c => c.Type == NodeType.PoemLine))
+            foreach (var line in stanza.Children)
             {
+                if (line.Type != NodeType.PoemLine) continue;
+
                 html.Append("<p class=\"poem-line\"");
                 AppendStyle(line, html);
                 html.Append('>')
@@ -1395,9 +1408,6 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         List<DiagnosticMessage> diagnostics)
     {
         var layout = GetAttribute(node, "timeline-layout") is "axis" ? "axis" : "edge";
-        var items = node.Children
-            .Where(child => child.Type == NodeType.TimelineItem)
-            .ToList();
 
         html.Append("<div class=\"md-timeline md-timeline-").Append(layout);
         if (GetAttribute(node, "timeline-line") == "dashed")
@@ -1414,16 +1424,17 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         AppendStyle(node, html, BuildNodeExtraInlineCss(node));
         html.Append('>');
 
-        if (items.Count == 0)
+        var hasItems = false;
+        foreach (var child in node.Children)
+        {
+            if (child.Type != NodeType.TimelineItem) continue;
+            hasItems = true;
+            RenderTimelineItem(child, html, diagnostics);
+        }
+
+        if (!hasItems)
         {
             html.Append("<div class=\"md-tl-empty\">在 @@ 行添加时间节点，空行后书写正文</div>");
-        }
-        else
-        {
-            foreach (var item in items)
-            {
-                RenderTimelineItem(item, html, diagnostics);
-            }
         }
 
         html.Append("</div>");
@@ -1438,11 +1449,17 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
 
         html.Append("<div class=\"md-tl-item\" data-side=\"").Append(side).Append('"');
         AppendNodeAttributes(item, html);
-        AppendStyle(item, html);
+        // 节点盒子样式（背景/边框/圆角/内边距）不落在整行 grid 上，
+        // 否则中轴布局下会连同对侧空白列一起被包裹；统一下沉到内容容器。
         html.Append('>');
 
         // 轴轨与实心圆点；主轴竖线由容器伪元素统一绘制，保证跨节点连续。
         html.Append("<div class=\"md-tl-rail\" aria-hidden=\"true\"><span class=\"md-tl-dot\"></span></div>");
+
+        // 内容容器：承载节点全部可视样式，只占内容侧列（axis 单侧 / edge 时间+正文）。
+        html.Append("<div class=\"md-tl-content\"");
+        AppendStyle(item, html);
+        html.Append('>');
 
         html.Append("<div class=\"md-tl-meta\">");
         var time = GetAttribute(item, "timeline-time");
@@ -1479,6 +1496,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         }
         html.Append("</div>");
 
+        html.Append("</div>");
         html.Append("</div>");
     }
 

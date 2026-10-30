@@ -13,13 +13,19 @@ public interface IStylePreviewStrategy
 
 internal static class StyleHtmlSanitizer
 {
+    private static readonly Regex JavaScriptSchemeRegex =
+        new(@"javascript\s*:", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex CssExpressionRegex =
+        new(@"expression\s*\(", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     public static string SanitizeStyle(string? css)
     {
         if (string.IsNullOrWhiteSpace(css)) return string.Empty;
 
         var sanitized = css.Replace("\"", "'");
-        sanitized = Regex.Replace(sanitized, @"javascript\s*:", string.Empty, RegexOptions.IgnoreCase);
-        sanitized = Regex.Replace(sanitized, @"expression\s*\(", string.Empty, RegexOptions.IgnoreCase);
+        sanitized = JavaScriptSchemeRegex.Replace(sanitized, string.Empty);
+        sanitized = CssExpressionRegex.Replace(sanitized, string.Empty);
 
         return sanitized;
     }

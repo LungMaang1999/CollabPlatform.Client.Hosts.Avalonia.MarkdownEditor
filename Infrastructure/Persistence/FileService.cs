@@ -68,21 +68,18 @@ public sealed class FileService : IFileService
         // loadStyle=false 表示用户拒绝载入样式：仍解析出干净的纯 Markdown 文档，
         // 但快照必须记住磁盘上样式文件的真实哈希，后续保存时原样保留、绝不覆盖。
         MarkdownDocument? documentFromXml = null;
-        string? loadedStylePath = null;
-        if (loadStyle)
+        var existingStylePath = FindExistingStyleFilePath(fullMarkdownPath);
+
+        if (loadStyle && existingStylePath is not null)
         {
-            loadedStylePath = FindExistingStyleFilePath(fullMarkdownPath);
-            if (loadedStylePath is not null)
-            {
-                await using var styleStream = new FileStream(
-                    loadedStylePath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read,
-                    64 * 1024,
-                    FileOptions.Asynchronous | FileOptions.SequentialScan);
-                documentFromXml = _serializer.Deserialize(styleStream, markdown, fullMarkdownPath);
-            }
+            await using var styleStream = new FileStream(
+                existingStylePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                64 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            documentFromXml = _serializer.Deserialize(styleStream, markdown, fullMarkdownPath);
         }
 
         var parseResult = _parser.Parse(markdown, previous: documentFromXml, mode: ParseMode.Loading);
@@ -90,28 +87,27 @@ public sealed class FileService : IFileService
         document.FilePath = fullMarkdownPath;
         document.MarkSaved();
 
-        if (loadedStylePath is not null)
+        if (loadStyle && existingStylePath is not null)
         {
-            var styleHash = await ComputeHashAsync(loadedStylePath, cancellationToken).ConfigureAwait(false);
-            var styleInfo = new FileInfo(loadedStylePath);
+            var styleHash = await ComputeHashAsync(existingStylePath, cancellationToken).ConfigureAwait(false);
+            var styleInfo = new FileInfo(existingStylePath);
             var snapshot = new DocumentFileSnapshot(
-                fullMarkdownPath, loadedStylePath, markdownHash, styleHash,
+                fullMarkdownPath, existingStylePath, markdownHash, styleHash,
                 markdownInfo.LastWriteTimeUtc, styleInfo.LastWriteTimeUtc,
                 StyleFileExists: true, StyleLoadDeclined: false);
             return new DocumentLoadResult(document, snapshot);
         }
 
-        var declinedPath = FindExistingStyleFilePath(fullMarkdownPath);
-        if (declinedPath is null)
+        if (existingStylePath is null)
         {
             var missingSnapshot = DocumentFileSnapshot.ForMissingStyleFile(fullMarkdownPath, markdownHash, markdownInfo.LastWriteTimeUtc, preferredStylePath);
             return new DocumentLoadResult(document, missingSnapshot);
         }
 
-        var declinedHash = await ComputeHashAsync(declinedPath, cancellationToken).ConfigureAwait(false);
-        var declinedInfo = new FileInfo(declinedPath);
+        var declinedHash = await ComputeHashAsync(existingStylePath, cancellationToken).ConfigureAwait(false);
+        var declinedInfo = new FileInfo(existingStylePath);
         var declinedSnapshot = new DocumentFileSnapshot(
-            fullMarkdownPath, declinedPath, markdownHash, declinedHash,
+            fullMarkdownPath, existingStylePath, markdownHash, declinedHash,
             markdownInfo.LastWriteTimeUtc, declinedInfo.LastWriteTimeUtc,
             StyleFileExists: true, StyleLoadDeclined: true);
         return new DocumentLoadResult(document, declinedSnapshot);
