@@ -12,10 +12,11 @@ public sealed record TimelineMarkerInfo(
     IReadOnlyList<string> Tags,
     string? Side);
 
-/// <summary>开围栏选项（<c>line=solid|dashed gap=2..24</c>）的解析结果。</summary>
+/// <summary>开围栏选项（<c>line=solid|dashed gap=2..24 sort=asc|desc</c>）的解析结果。</summary>
 /// <param name="LineStyle">轴线线型：solid（缺省）或 dashed。</param>
 /// <param name="Gap">虚线段间隙像素；仅 dashed 时有意义，缺省由 CSS 取默认值。</param>
-public sealed record TimelineFenceInfo(string LineStyle, int? Gap);
+/// <param name="Sort">节点排序：asc（正序）、desc（逆序）；null 表示不排序（保持源码顺序，缺省）。</param>
+public sealed record TimelineFenceInfo(string LineStyle, int? Gap, string? Sort);
 
 /// <summary>
 /// 时间线 @@ 标记行的解析与规范化，解析器与宿主属性改写计划器共用同一套语法。
@@ -30,6 +31,12 @@ public static class TimelineMarker
 
     /// <summary>轴线线型：虚线。</summary>
     public const string LineDashed = "dashed";
+
+    /// <summary>节点排序：正序（缺省，按时间从早到晚）。</summary>
+    public const string SortAsc = "asc";
+
+    /// <summary>节点排序：逆序（按时间从晚到早）。</summary>
+    public const string SortDesc = "desc";
 
     /// <summary>虚线间隙允许范围（像素）与缺省值。</summary>
     public const int MinLineGap = 2;
@@ -147,13 +154,14 @@ public static class TimelineMarker
     }
 
     /// <summary>
-    /// 解析开围栏 <c>timeline</c> 之后的选项串：<c>line=solid|dashed</c>、<c>gap=2..24</c>。
+    /// 解析开围栏 <c>timeline</c> 之后的选项串：<c>line=solid|dashed</c>、<c>gap=2..24</c>、<c>sort=asc|desc</c>。
     /// 未知选项忽略；非法值回退缺省。
     /// </summary>
     public static TimelineFenceInfo ParseFenceInfo(string? info)
     {
         var lineStyle = LineSolid;
         int? gap = null;
+        string? sort = null;
 
         if (!string.IsNullOrWhiteSpace(info))
         {
@@ -177,30 +185,47 @@ public static class TimelineMarker
                         && parsed is >= MinLineGap and <= MaxLineGap:
                         gap = parsed;
                         break;
+                    case "sort":
+                        sort = val == SortDesc ? SortDesc : SortAsc;
+                        break;
                 }
             }
         }
 
-        return new TimelineFenceInfo(lineStyle, gap);
+        return new TimelineFenceInfo(lineStyle, gap, sort);
     }
 
     /// <summary>
-    /// 按线型/间隙重建开围栏选项串（不含前导空白）：实线或全缺省返回空串；
-    /// 虚线且间隙为缺省值时省略 gap。
+    /// 按线型/间隙/排序重建开围栏选项串（不含前导空白）：
+    /// 实线或全缺省返回空串；虚线且间隙为缺省值时省略 gap；
+    /// sort 为 null 时不写（保持源码顺序），asc/desc 显式写出。
     /// </summary>
-    public static string BuildFenceInfo(string? lineStyle, int? gap)
+    public static string BuildFenceInfo(string? lineStyle, int? gap, string? sort = null)
     {
-        if (!string.Equals(lineStyle?.Trim(), LineDashed, StringComparison.OrdinalIgnoreCase))
+        var parts = new List<string>();
+
+        if (string.Equals(lineStyle?.Trim(), LineDashed, StringComparison.OrdinalIgnoreCase))
         {
-            return string.Empty;
+            if (gap is int parsed && parsed is >= MinLineGap and <= MaxLineGap && parsed != DefaultLineGap)
+            {
+                parts.Add($"line={LineDashed} gap={parsed}");
+            }
+            else
+            {
+                parts.Add($"line={LineDashed}");
+            }
         }
 
-        if (gap is int parsed && parsed is >= MinLineGap and <= MaxLineGap && parsed != DefaultLineGap)
+        if (string.Equals(sort?.Trim(), SortDesc, StringComparison.OrdinalIgnoreCase))
         {
-            return $"line={LineDashed} gap={parsed}";
+            parts.Add($"sort={SortDesc}");
+        }
+        else if (string.Equals(sort?.Trim(), SortAsc, StringComparison.OrdinalIgnoreCase))
+        {
+            parts.Add($"sort={SortAsc}");
         }
 
-        return $"line={LineDashed}";
+        return string.Join(" ", parts);
     }
 
     /// <summary>

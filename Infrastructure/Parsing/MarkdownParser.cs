@@ -47,6 +47,7 @@ public sealed class MarkdownParser : IMarkdownParser
         pipelineBuilder.BlockParsers.Insert(0, new ImageMatrixFenceParser());
         pipelineBuilder.BlockParsers.Insert(0, new PoemFenceParser());
         pipelineBuilder.BlockParsers.Insert(0, new TimelineFenceParser());
+        pipelineBuilder.BlockParsers.Insert(0, new RadarFenceParser());
 
         _pipeline = pipelineBuilder.Build();
 
@@ -609,7 +610,7 @@ public sealed class MarkdownParser : IMarkdownParser
         {
             if ((block.Type == NodeType.CodeBlock || block.Type == NodeType.ImageMatrix
                     || block.Type == NodeType.QrCode || block.Type == NodeType.PoemBlock
-                    || block.Type == NodeType.Timeline)
+                    || block.Type == NodeType.Timeline || block.Type == NodeType.Radar)
                 && block.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
             {
                 return false;
@@ -1011,7 +1012,8 @@ public sealed class MarkdownParser : IMarkdownParser
                 || node.Type == NodeType.ImageMatrix
                 || node.Type == NodeType.QrCode
                 || node.Type == NodeType.PoemBlock
-                || node.Type == NodeType.Timeline)
+                || node.Type == NodeType.Timeline
+                || node.Type == NodeType.Radar)
             {
                 if (node.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
                 {

@@ -664,6 +664,10 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
                     // 时间线节点只能经 RenderTimeline 统一布局输出，不允许独立成帧。
                     return;
 
+                case NodeType.Radar:
+                    RenderRadar(node, html);
+                    return;
+
                 case NodeType.Custom:
                     RenderCustomBlock(node, html, diagnostics);
                     break;
@@ -1498,6 +1502,254 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
 
         html.Append("</div>");
         html.Append("</div>");
+    }
+
+    // 雷达图系列配色（循环使用）。
+    private static readonly string[] RadarSeriesColors =
+    {
+        "#ef4444", "#3b82f6", "#22c55e", "#f59e0b",
+        "#8b5cf6", "#06b6d4", "#ec4899", "#84cc16",
+    };
+
+    /// <summary>
+    /// 渲染雷达图：解析围栏内表格，生成内联 SVG（同心网格 + 轴线 + 系列多边形 + 可选数值标签），
+    /// 标题与底部图例用 HTML 承载以便文本排版。数据非法时显示占位提示。
+    /// </summary>
+    private void RenderRadar(MarkdownNode node, StringBuilder html)
+    {
+        var title = GetAttribute(node, "radar-title") ?? string.Empty;
+        var showLabels = GetAttribute(node, "radar-labels") == "show";
+        var showLegend = GetAttribute(node, "radar-legend") != "hide";
+        var fillOpacity = RadarMarker.DefaultFillOpacity;
+        if (int.TryParse(GetAttribute(node, "radar-fill"),
+                System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var fill)
+            && fill is >= RadarMarker.MinFillOpacity and <= RadarMarker.MaxFillOpacity)
+        {
+            fillOpacity = fill;
+        }
+
+        var table = RadarMarker.ParseTable(node.Text);
+
+        html.Append("<figure class=\"md-radar");
+        if (node.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
+            html.Append(" md-radar-pending");
+        if (table is null)
+            html.Append(" md-radar-empty");
+        html.Append('"');
+        AppendNodeAttributes(node, html);
+        html.Append('>');
+
+        if (table is null || table.Axes.Count < 3)
+        {
+            html.Append("<div class=\"md-radar-placeholder\">")
+                .Append("<span class=\"md-radar-placeholder-icon\" aria-hidden=\"true\">◎</span>")
+                .Append("<span>用表格定义雷达图：首行系列名，首列轴名，单元格填数值</span>")
+                .Append("</div>");
+            html.Append("</figure>");
+            return;
+        }
+
+        var seriesCount = table.SeriesNames.Count;
+        var axisCount = table.Axes.Count;
+
+        // 量程：显式 max 优先，否则取数据最大值向上取整到"好看"的数。
+        double maxScale;
+        var scaleAttr = GetAttribute(node, "radar-scale");
+        if (!string.IsNullOrWhiteSpace(scaleAttr)
+            && scaleAttr.StartsWith("max:", StringComparison.Ordinal)
+            && scaleAttr.Length > 4
+            && double.TryParse(scaleAttr.Substring(4), NumberStyles.Float,
+                CultureInfo.InvariantCulture, out var explicitMax)
+            && explicitMax > 0)
+        {
+            maxScale = explicitMax;
+        }
+        else
+        {
+            var dataMax = 0.0;
+            foreach (var axis in table.Axes)
+                foreach (var v in axis.Values)
+                    if (v > dataMax) dataMax = v;
+            maxScale = NiceRadarMax(dataMax);
+        }
+
+        // SVG 坐标系：根据 size 选项选择 viewBox/圆心/半径，四周留标签空间。
+        var sizeAttr = GetAttribute(node, "radar-size");
+        var size = string.IsNullOrWhiteSpace(sizeAttr) ? RadarMarker.SizeMedium : sizeAttr.Trim();
+        var (viewBox, cx, cy, r) = RadarMarker.SizeGeometry(size);
+        const int gridLevels = 5;
+
+        html.Append("<div class=\"md-radar-chart\">")
+            .Append("<svg class=\"md-radar-svg\" viewBox=\"0 0 ")
+            .Append(viewBox.ToString(CultureInfo.InvariantCulture)).Append(' ')
+            .Append(viewBox.ToString(CultureInfo.InvariantCulture))
+            .Append("\" role=\"img\"");
+
+        if (title.Length > 0)
+            html.Append(" aria-label=\"").Append(WebUtility.HtmlEncode(title)).Append('"');
+
+        html.Append(">");
+
+        // 同心网格多边形（从外到内，外层先画避免遮挡）。
+        for (var level = gridLevels; level >= 1; level--)
+        {
+            var frac = (double)level / gridLevels;
+            html.Append("<polygon class=\"md-radar-grid\" points=\"");
+            for (var i = 0; i < axisCount; i++)
+            {
+                var (px, py) = RadarPoint(cx, cy, r * frac, i, axisCount);
+                html.Append(px.ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                    .Append(',')
+                    .Append(py.ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                    .Append(' ');
+            }
+            html.Append("\" />");
+        }
+
+        // 轴线（中心到各顶点）。
+        for (var i = 0; i < axisCount; i++)
+        {
+            var (px, py) = RadarPoint(cx, cy, r, i, axisCount);
+            html.Append("<line class=\"md-radar-axis\" x1=\"")
+                .Append(cx.ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                .Append("\" y1=\"")
+                .Append(cy.ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                .Append("\" x2=\"")
+                .Append(px.ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                .Append("\" y2=\"")
+                .Append(py.ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                .Append("\" />");
+        }
+
+        // 轴标签（顶点外侧）。
+        for (var i = 0; i < axisCount; i++)
+        {
+            var (px, py) = RadarPoint(cx, cy, r + 18, i, axisCount);
+            var anchor = RadarLabelAnchor(i, axisCount);
+            html.Append("<text class=\"md-radar-label\" x=\"")
+                .Append(px.ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                .Append("\" y=\"")
+                .Append(py.ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                .Append("\" text-anchor=\"").Append(anchor).Append("\">")
+                .Append(WebUtility.HtmlEncode(table.Axes[i].Label))
+                .Append("</text>");
+        }
+
+        // 系列多边形。
+        for (var s = 0; s < seriesCount; s++)
+        {
+            var color = RadarSeriesColors[s % RadarSeriesColors.Length];
+            html.Append("<polygon class=\"md-radar-series\" fill=\"").Append(color)
+                .Append("\" fill-opacity=\"").Append((fillOpacity / 100.0).ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                .Append("\" stroke=\"").Append(color).Append("\" points=\"");
+            for (var i = 0; i < axisCount; i++)
+            {
+                var v = table.Axes[i].Values[s];
+                var frac = maxScale > 0 ? Math.Clamp(v / maxScale, 0, 1) : 0;
+                var (px, py) = RadarPoint(cx, cy, r * frac, i, axisCount);
+                html.Append(px.ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                    .Append(',')
+                    .Append(py.ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                    .Append(' ');
+            }
+            html.Append("\" />");
+        }
+
+        // 数据点与可选数值标签。
+        for (var s = 0; s < seriesCount; s++)
+        {
+            var color = RadarSeriesColors[s % RadarSeriesColors.Length];
+            for (var i = 0; i < axisCount; i++)
+            {
+                var v = table.Axes[i].Values[s];
+                var frac = maxScale > 0 ? Math.Clamp(v / maxScale, 0, 1) : 0;
+                var (px, py) = RadarPoint(cx, cy, r * frac, i, axisCount);
+                html.Append("<circle class=\"md-radar-dot\" cx=\"")
+                    .Append(px.ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                    .Append("\" cy=\"")
+                    .Append(py.ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                    .Append("\" r=\"3\" fill=\"").Append(color).Append("\" />");
+
+                if (showLabels)
+                {
+                    // 数值标签：放在数据点沿径向外移的位置，同轴线不同系列按系列索引
+                    // 递增偏移量（8 + s*5），沿径向均匀错开避免重叠。数字用系列颜色，
+                    // 与对应多边形同色，用户通过颜色即可识别归属。
+                    var offset = 8 + s * 5;
+                    var (lx, ly) = RadarPoint(cx, cy, r * frac + offset, i, axisCount);
+                    var anchor = RadarLabelAnchor(i, axisCount);
+                    html.Append("<text class=\"md-radar-value\" fill=\"").Append(color)
+                        .Append("\" x=\"")
+                        .Append(lx.ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                        .Append("\" y=\"")
+                        .Append(ly.ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                        .Append("\" text-anchor=\"").Append(anchor).Append("\">")
+                        .Append(v.ToString("G", System.Globalization.CultureInfo.InvariantCulture))
+                        .Append("</text>");
+                }
+            }
+        }
+
+        html.Append("</svg></div>");
+
+        if (title.Length > 0)
+        {
+            html.Append("<figcaption class=\"md-radar-title\">")
+                .Append(WebUtility.HtmlEncode(title))
+                .Append("</figcaption>");
+        }
+
+        if (showLegend && seriesCount > 0)
+        {
+            html.Append("<div class=\"md-radar-legend\">");
+            for (var s = 0; s < seriesCount; s++)
+            {
+                var color = RadarSeriesColors[s % RadarSeriesColors.Length];
+                html.Append("<span class=\"md-radar-legend-item\">")
+                    .Append("<span class=\"md-radar-legend-swatch\" style=\"background:").Append(color).Append("\"></span>")
+                    .Append("<span class=\"md-radar-legend-name\">")
+                    .Append(WebUtility.HtmlEncode(table.SeriesNames[s]))
+                    .Append("</span></span>");
+            }
+            html.Append("</div>");
+        }
+
+        html.Append("</figure>");
+    }
+
+    // 第 i 个轴（0-based，共 n 个）在半径 rad 处的坐标；起始于正上方，顺时针分布。
+    private static (double x, double y) RadarPoint(double cx, double cy, double rad, int i, int n)
+    {
+        var angle = -Math.PI / 2 + i * (2 * Math.PI / n);
+        return (cx + rad * Math.Cos(angle), cy + rad * Math.Sin(angle));
+    }
+
+    // 轴标签的 text-anchor：右侧轴用 start，左侧用 end，上下用 middle。
+    private static string RadarLabelAnchor(int i, int n)
+    {
+        var angle = -Math.PI / 2 + i * (2 * Math.PI / n);
+        var cos = Math.Cos(angle);
+        if (cos > 0.2) return "start";
+        if (cos < -0.2) return "end";
+        return "middle";
+    }
+
+    // 将数据最大值向上取整到 1/2/5×10^n 形式的"好看"量程上限。
+    private static double NiceRadarMax(double value)
+    {
+        if (value <= 0) return 1;
+        var exp = Math.Floor(Math.Log10(value));
+        var base10 = Math.Pow(10, exp);
+        var norm = value / base10;
+        double nice = norm switch
+        {
+            <= 1 => 1,
+            <= 2 => 2,
+            <= 5 => 5,
+            _ => 10
+        };
+        return nice * base10;
     }
 
     private void RenderLink(MarkdownNode node, StringBuilder html, List<DiagnosticMessage> diagnostics)

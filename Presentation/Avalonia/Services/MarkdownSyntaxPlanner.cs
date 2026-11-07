@@ -450,37 +450,80 @@ internal static class MarkdownSyntaxPlanner
         "| --- | --- | --- |\n" +
         "| 内容 | 内容 | 内容 |";
 
+    // 块级元素必须落在行边界：空行就地插入，非空行在行尾另起块，
+    // 前后按相邻换行折算空行，避免把当前行内容并进新块破坏语法。
     private static SyntaxPlan InsertTable(string source, int offset)
     {
-        var (lineStart, _) = LineBounds(source, offset);
+        var (lineStart, lineEnd) = LineBounds(source, offset);
+        bool isBlankLine = string.IsNullOrWhiteSpace(source[lineStart..lineEnd]);
 
-        bool needLead = lineStart > 0;
-        string lead = needLead ? "\n\n" : string.Empty;
-        string replacement = lead + TableTemplate;
+        int anchor = isBlankLine ? lineStart : lineEnd;
+        string lead = LeadGap(source, anchor);
+        string tail = TailGap(source, anchor);
+        string replacement = lead + TableTemplate + tail;
 
         int localSelectionStart = lead.Length + 2;
         int localSelectionLength = 3;
 
         return new SyntaxPlan(
-            CreateRange(source, lineStart, lineStart),
+            CreateRange(source, anchor, anchor),
             replacement,
-            lineStart + localSelectionStart,
+            anchor + localSelectionStart,
             localSelectionLength);
     }
 
     private static SyntaxPlan InsertHorizontalRule(string source, int offset)
     {
-        var (lineStart, _) = LineBounds(source, offset);
+        var (lineStart, lineEnd) = LineBounds(source, offset);
+        bool isBlankLine = string.IsNullOrWhiteSpace(source[lineStart..lineEnd]);
 
-        bool needLead = lineStart > 0;
-        string lead = needLead ? "\n\n" : string.Empty;
-        string replacement = lead + "---";
+        int anchor = isBlankLine ? lineStart : lineEnd;
+        string lead = LeadGap(source, anchor);
+        string tail = TailGap(source, anchor);
+        string body = "---";
+        string replacement = lead + body + tail;
 
         return new SyntaxPlan(
-            CreateRange(source, lineStart, lineStart),
+            CreateRange(source, anchor, anchor),
             replacement,
-            lineStart + replacement.Length,
+            anchor + lead.Length + body.Length,
             0);
+    }
+
+    // anchor 前补前导换行：前一字符非换行补两个，已有一个换行补一个，已是空行则不补。
+    private static string LeadGap(string source, int anchor)
+    {
+        if (anchor <= 0)
+        {
+            return string.Empty;
+        }
+        if (source[anchor - 1] != '\n')
+        {
+            return "\n\n";
+        }
+        if (anchor >= 2 && source[anchor - 2] == '\n')
+        {
+            return string.Empty;
+        }
+        return "\n";
+    }
+
+    // anchor 后补尾随换行：后一字符非换行补两个，恰好一个换行补一个，已有空行则不补。
+    private static string TailGap(string source, int anchor)
+    {
+        if (anchor >= source.Length)
+        {
+            return string.Empty;
+        }
+        if (source[anchor] != '\n')
+        {
+            return "\n\n";
+        }
+        if (anchor + 1 < source.Length && source[anchor + 1] == '\n')
+        {
+            return string.Empty;
+        }
+        return "\n";
     }
 
 }

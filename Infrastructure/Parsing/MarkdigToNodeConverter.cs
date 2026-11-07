@@ -57,7 +57,7 @@ public sealed class MarkdigToNodeConverter
             && node.Range.StartLine == unclosedFenceStartLine.Value
             && node.Type is NodeType.CodeBlock or NodeType.MathBlock or NodeType.Mermaid
                 or NodeType.ImageMatrix or NodeType.QrCode or NodeType.PoemBlock
-                or NodeType.Timeline)
+                or NodeType.Timeline or NodeType.Radar)
         {
             // 文档末尾未闭合围栏对应的代码/math 围栏/mermaid 块。
             node.Attributes[MarkdownAttributes.Unclosed] = "true";
@@ -327,6 +327,9 @@ public sealed class MarkdigToNodeConverter
             case TimelineBlock timelineBlock:
                 return BuildTimeline(timelineBlock, range, diagnostics, source);
 
+            case RadarBlock radarBlock:
+                return BuildRadar(radarBlock, range);
+
             case FencedCodeBlock codeBlock:
                 {
                     var codeText = codeBlock.Lines.ToString();
@@ -489,6 +492,47 @@ public sealed class MarkdigToNodeConverter
         int BodyStartLine);
 
     /// <summary>
+    /// 把雷达图围栏转为 Radar 容器节点：表格原文存于 node.Text，开围栏选项落属性，
+    /// 渲染时再解析表格并生成内联 SVG（与二维码同思路，不拆子节点）。
+    /// </summary>
+    private MarkdownNode BuildRadar(RadarBlock radarBlock, SourceRange range)
+    {
+        var radar = _nodeFactory.Create(
+            NodeType.Radar,
+            NodeCategory.Block,
+            text: radarBlock.Lines.ToString().TrimEnd('\r', '\n'),
+            range: range);
+
+        var info = RadarMarker.ParseFenceInfo(radarBlock.Info);
+        if (info.Title.Length > 0)
+        {
+            radar.Attributes["radar-title"] = info.Title;
+        }
+        if (info.ShowLabels)
+        {
+            radar.Attributes["radar-labels"] = "show";
+        }
+        if (info.MaxScale is double maxScale)
+        {
+            radar.Attributes["radar-scale"] = "max:" + maxScale.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        if (!info.ShowLegend)
+        {
+            radar.Attributes["radar-legend"] = "hide";
+        }
+        if (info.FillOpacity != RadarMarker.DefaultFillOpacity)
+        {
+            radar.Attributes["radar-fill"] = info.FillOpacity.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        if (!string.Equals(info.Size, RadarMarker.SizeMedium, StringComparison.Ordinal))
+        {
+            radar.Attributes["radar-size"] = info.Size;
+        }
+
+        return radar;
+    }
+
+    /// <summary>
     /// 把时间线围栏展开为 Timeline + TimelineItem 虚拟节点序列：@@ 行解析为
     /// 时间/标签/侧别属性，节点正文递归走完整 Markdown 管线，局部坐标平移到全文。
     /// </summary>
@@ -509,7 +553,7 @@ public sealed class MarkdigToNodeConverter
         // 默认即中轴双列：侧别缺省的节点按序左右交替，与属性面板“自动”一致。
         timeline.Attributes["timeline-layout"] = "axis";
 
-        // 开围栏选项：line=solid|dashed、gap=2..24（仅虚线时落属性）
+        // 开围栏选项：line=solid|dashed、gap=2..24（仅虚线时落属性）、sort=asc|desc
         var fenceInfo = TimelineMarker.ParseFenceInfo(timelineBlock.Info);
         if (fenceInfo.LineStyle == TimelineMarker.LineDashed)
         {
@@ -518,6 +562,21 @@ public sealed class MarkdigToNodeConverter
             {
                 timeline.Attributes["timeline-gap"] = gap.ToString();
             }
+        }
+
+        // 排序：仅当显式设置 sort=asc|desc 时按时间排序；缺省保持源码顺序（向后兼容）。
+        // 时间能解析为日期则按日期排序，解析失败的节点排在末尾并保持源码相对顺序（稳定排序）。
+        var sortDesc = string.Equals(fenceInfo.Sort, TimelineMarker.SortDesc, StringComparison.OrdinalIgnoreCase);
+        var sortAsc = string.Equals(fenceInfo.Sort, TimelineMarker.SortAsc, StringComparison.OrdinalIgnoreCase);
+        if (sortDesc)
+        {
+            timeline.Attributes["timeline-sort"] = TimelineMarker.SortDesc;
+            records = SortTimelineRecords(records, sortDesc: true);
+        }
+        else if (sortAsc)
+        {
+            timeline.Attributes["timeline-sort"] = TimelineMarker.SortAsc;
+            records = SortTimelineRecords(records, sortDesc: false);
         }
 
         for (var index = 0; index < records.Count; index++)
@@ -674,6 +733,43 @@ public sealed class MarkdigToNodeConverter
         }
 
         return records;
+    }
+
+    /// <summary>
+    /// 按时间节点排序：desc 时按日期从晚到早，否则从早到晚。
+    /// 时间无法解析为日期的节点统一排到末尾，保持源码相对顺序（LINQ OrderBy 稳定排序）。
+    /// </summary>
+    private static List<TimelineItemScan> SortTimelineRecords(List<TimelineItemScan> records, bool sortDesc)
+    {
+        if (records.Count <= 1)
+        {
+            return records;
+        }
+
+        // asc：可解析的按日期升序，不可解析的 DateTime.MaxValue 沉底；
+        // desc：可解析的按日期降序，不可解析的 DateTime.MinValue 沉底。
+        return sortDesc
+            ? records
+                .OrderByDescending(r => TryParseTimelineDate(r.Info.Time) ?? DateTime.MinValue)
+                .ToList()
+            : records
+                .OrderBy(r => TryParseTimelineDate(r.Info.Time) ?? DateTime.MaxValue)
+                .ToList();
+    }
+
+    private static DateTime? TryParseTimelineDate(string? time)
+    {
+        if (string.IsNullOrWhiteSpace(time))
+        {
+            return null;
+        }
+
+        return DateTime.TryParse(time.Trim(),
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeLocal,
+            out var date)
+            ? date
+            : null;
     }
 
     // 返回 fromOffset 所在行的下一行行首偏移。
@@ -1074,6 +1170,10 @@ public sealed class MarkdigToNodeConverter
         else if (obj is TimelineBlock { ClosingFenceLineIndex: >= 0 } timelineFence)
         {
             endLine = timelineFence.ClosingFenceLineIndex.Value + 1;
+        }
+        else if (obj is RadarBlock { ClosingFenceLineIndex: >= 0 } radarFence)
+        {
+            endLine = radarFence.ClosingFenceLineIndex.Value + 1;
         }
         else if (obj is LeafBlock leafBlock && leafBlock.Lines.Lines != null && leafBlock.Lines.Count > 0)
         {
