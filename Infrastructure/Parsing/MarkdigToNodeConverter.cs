@@ -197,6 +197,10 @@ public sealed class MarkdigToNodeConverter
                     NodeCategory.Container,
                     range: range);
 
+                // 列对齐：Markdig 会把分隔行的 :--- / ---: / :---: 解析到 ColumnDefinitions。
+                // 渲染层需要每个单元格知道自己的对齐方式，这里在解析期直接下推到 TableCell 节点。
+                var columnAligns = tableBlock.ColumnDefinitions;
+
                 foreach (var rowObj in tableBlock)
                 {
                     if (rowObj is not TableRow rowBlock)
@@ -209,6 +213,7 @@ public sealed class MarkdigToNodeConverter
                         NodeCategory.Container,
                         range: BlockRangeProjector.Get(rowBlock));
 
+                    int colIndex = 0;
                     foreach (var cellObj in rowBlock)
                     {
                         if (cellObj is not TableCell cellBlock)
@@ -223,6 +228,23 @@ public sealed class MarkdigToNodeConverter
 
                         cellNode.IsTableHeader = rowBlock.IsHeader;
 
+                        // 把该单元格所在列的对齐方式记下来：渲染时据此加 text-align。
+                        if (columnAligns is not null
+                            && colIndex < columnAligns.Count)
+                        {
+                            var align = columnAligns[colIndex].Alignment switch
+                            {
+                                TableColumnAlign.Left => "left",
+                                TableColumnAlign.Right => "right",
+                                TableColumnAlign.Center => "center",
+                                _ => null
+                            };
+                            if (align is not null)
+                            {
+                                cellNode.SetDerivedAttribute("column-align", align);
+                            }
+                        }
+
                         var cellChildren = ConvertChildren(cellBlock, diagnostics, source);
                         foreach (var child in cellChildren)
                         {
@@ -231,6 +253,7 @@ public sealed class MarkdigToNodeConverter
 
                         cellNode.Text = GetInlineText(cellNode);
                         rowNode.AddChild(cellNode);
+                        colIndex++;
                     }
 
                     tableNode.AddChild(rowNode);

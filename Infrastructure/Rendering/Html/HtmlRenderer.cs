@@ -2473,6 +2473,10 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         "align-block" => node => ResolveReplacedAlignmentCss(node, forceBlockDisplay: true),
         "align-inline" => node => ResolveReplacedAlignmentCss(node, forceBlockDisplay: false),
         "table-row-vars" => BuildTableRowCascadeVars,
+        "cell-align" => node =>
+            node.Attributes.TryGetValue("column-align", out var align) && !string.IsNullOrEmpty(align)
+                ? "text-align: " + align + ";"
+                : null,
         "math-vars" => BuildMathStyleVars,
         "matrix-vars" => node => BuildMatrixExtraCss(node, CountMatrixColumns(CollectMatrixRows(node))),
         "accent-adm" => node => ResolveSemanticAccentCss(node, "--adm-accent"),
@@ -5034,17 +5038,17 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         // SVG 坐标系：根据 size 选项选择 viewBox/圆心/半径，四周留标签空间。
         var sizeAttr = GetAttribute(node, "radar-size");
         var size = string.IsNullOrWhiteSpace(sizeAttr) ? RadarMarker.SizeMedium : sizeAttr.Trim();
-        var (viewBox, cx, cy, r) = RadarMarker.SizeGeometry(size);
+        var (vbW, vbH, cx, cy, r) = RadarMarker.SizeGeometry(size);
         const int gridLevels = 5;
 
         html.Append("<div class=\"md-radar-chart\">")
             .Append("<svg class=\"md-radar-svg\" width=\"")
-            .Append(viewBox.ToString(CultureInfo.InvariantCulture))
+            .Append(vbW.ToString(CultureInfo.InvariantCulture))
             .Append("\" height=\"")
-            .Append(viewBox.ToString(CultureInfo.InvariantCulture))
+            .Append(vbH.ToString(CultureInfo.InvariantCulture))
             .Append("\" viewBox=\"0 0 ")
-            .Append(viewBox.ToString(CultureInfo.InvariantCulture)).Append(' ')
-            .Append(viewBox.ToString(CultureInfo.InvariantCulture))
+            .Append(vbW.ToString(CultureInfo.InvariantCulture)).Append(' ')
+            .Append(vbH.ToString(CultureInfo.InvariantCulture))
             .Append("\" role=\"img\"");
 
         if (title.Length > 0)

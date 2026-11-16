@@ -35,7 +35,7 @@ public sealed record RadarTable(
 public static class RadarMarker
 {
     /// <summary>填充不透明度缺省值（%）。</summary>
-    public const int DefaultFillOpacity = 30;
+    public const int DefaultFillOpacity = 45;
 
     /// <summary>填充不透明度允许范围。</summary>
     public const int MinFillOpacity = 0;
@@ -46,12 +46,13 @@ public static class RadarMarker
     public const string SizeMedium = "medium";
     public const string SizeLarge = "large";
 
-    /// <summary>各尺寸对应的 SVG 参数：viewBox 边长、圆心、绘图半径。</summary>
-    public static (int ViewBox, double Cx, double Cy, double Radius) SizeGeometry(string size) => size switch
+    /// <summary>各尺寸对应的 SVG 参数：viewBox 宽、viewBox 高、圆心 x、圆心 y、绘图半径。
+    /// 圆心略向上偏移（cy 小于 vbH/2），半径刻意收小，让上下左右留足标签空间但不浪费版面。</summary>
+    public static (int ViewBoxW, int ViewBoxH, double Cx, double Cy, double Radius) SizeGeometry(string size) => size switch
     {
-        SizeSmall => (360, 180.0, 180.0, 110.0),
-        SizeLarge => (480, 240.0, 240.0, 150.0),
-        _ => (420, 210.0, 210.0, 130.0),
+        SizeSmall => (360, 260, 180.0, 130.0, 95.0),
+        SizeLarge => (480, 370, 240.0, 185.0, 135.0),
+        _ => (420, 320, 210.0, 160.0, 115.0),
     };
 
     /// <summary>

@@ -911,6 +911,10 @@ public static class UserBlockElementsSerializer
         // 声明面：继承合并要区分“子写了默认值”与“子压根没写”。
         var declaredFields = ReadDefinitionDeclaredFields(element);
 
+        // 两个分支（applies-to / 围栏定义）共用的声明：避免跨分支作用域冲突。
+        string? itemMarker = null;
+        string? opens = null;
+
         // 内置类型重写定义：applies-to 指向 NodeType 枚举名，不参与围栏关键字竞争，
         // 也不写 name/fence/priority —— 它只提供结构描述。
         var appliesToText = (element.Attribute("applies-to")?.Value ?? string.Empty).Trim();
@@ -992,7 +996,7 @@ public static class UserBlockElementsSerializer
                 variant = normalizedVariant;
             }
 
-            string? itemMarker = null;
+            // 条目切分标记：非法只忽略不整条拒载。
             var itemMarkerText = (element.Attribute("item-marker")?.Value ?? string.Empty).Trim();
             if (itemMarkerText.Length > 0)
             {
@@ -1012,7 +1016,6 @@ public static class UserBlockElementsSerializer
 
             // 首词分派：opens 声明本定义的 keywords 在哪些围栏字符下开启哪个块类型。
             // 只影响语法形态，不整条丢弃定义：任一项不成立就忽略该字段，结构仍按原样生效。
-            string? opens = null;
             IReadOnlyList<string> opensKeywords = [];
             IReadOnlyList<char> opensFenceChars = [];
             var opensText = (element.Attribute("opens")?.Value ?? string.Empty).Trim();
@@ -1246,6 +1249,40 @@ public static class UserBlockElementsSerializer
             return null;
         }
 
+        // 条目切分标记：≤4 个非空白、非字母数字字符；非法只忽略不整条拒载。
+        var itemMarkerTextFence = (element.Attribute("item-marker")?.Value ?? string.Empty).Trim();
+        if (itemMarkerTextFence.Length > 0)
+        {
+            if (UserBlockStructureRules.TryNormalizeItemMarker(itemMarkerTextFence, out var normalizedMarker))
+            {
+                itemMarker = normalizedMarker;
+            }
+            else
+            {
+                diagnostics.Add(Diagnostic(
+                    DiagnosticSeverity.Error,
+                    "USER_ELEMENTS_ITEM_MARKER_INVALID",
+                    $"用户元素 '{id}' 的 item-marker='{itemMarkerTextFence}' 不合法（需 ≤4 个非空白、非字母数字字符）。已忽略该字段。"));
+            }
+        }
+
+        // 首词分派目标：非法值直接拒载——opens 是结构意图的一部分，错了整条定义就没有意义。
+        var opensTextFence = (element.Attribute("opens")?.Value ?? string.Empty).Trim();
+        if (opensTextFence.Length > 0)
+        {
+            if (!FenceOpenTargets.TryNormalize(opensTextFence, out var normalizedOpens))
+            {
+                diagnostics.Add(Diagnostic(
+                    DiagnosticSeverity.Error,
+                    "USER_ELEMENTS_OPENS_INVALID",
+                    $"用户元素 '{id}' 的 opens='{opensTextFence}' 不在可声明的块类型内"
+                    + $"（允许：{string.Join(" / ", FenceOpenTargets.Names)}）。已跳过该定义。"));
+                return null;
+            }
+
+            opens = normalizedOpens;
+        }
+
         // 结构里的标签插值要对着属性声明校验，因此属性必须先读出来。
         var attributes = ReadAttributes(element, id, diagnostics);
         var attributeGroups = ReadAttributeGroupRefs(element, id, diagnostics);
@@ -1300,6 +1337,32 @@ public static class UserBlockElementsSerializer
             }
         }
 
+        var structure = ReadStructure(
+            element,
+            id,
+            attributes,
+            diagnostics,
+            deferValidation: attributeGroups.Count > 0
+                || StructureDeclaresInclude(element)
+                || extends is not null,
+            // 继承定义的部件可以省略 tag：读入时先按透明部件保留，合并时再从父部件继承。
+            inheritTag: extends is not null);
+
+        // 围栏定义原始 XML 有 <structure> 但被 ReadStructure 校验成 Empty，
+        // 且缺的是 body 槽 → 整条拒载，避免静默回退内置模板。
+        // 其他原因（如 Policy 拒绝 script 标签）是合法的安全降级，保留定义但结构回退。
+        if (structure.Root is null
+            && extends is null
+            && element.Elements().Any(child => string.Equals(child.Name.LocalName, "structure", StringComparison.Ordinal))
+            && diagnostics.Any(item => item.Code == "USER_ELEMENTS_STRUCTURE_NO_CONTENT"))
+        {
+            diagnostics.Add(Diagnostic(
+                DiagnosticSeverity.Error,
+                "USER_ELEMENTS_STRUCTURE_INVALID",
+                $"用户元素 '{id}' 的结构缺少正文槽位，已跳过该定义。"));
+            return null;
+        }
+
         return new UserBlockDefinition
         {
             Id = id,
@@ -1311,19 +1374,12 @@ public static class UserBlockElementsSerializer
             FenceChars = fenceChars,
             FenceLength = fenceLength,
             Priority = priority,
+            ItemMarker = itemMarker,
+            Opens = opens,
             Attributes = attributes,
             AttributeGroups = attributeGroups,
             Content = ReadContent(element, id, diagnostics),
-            Structure = ReadStructure(
-                element,
-                id,
-                attributes,
-                diagnostics,
-                deferValidation: attributeGroups.Count > 0
-                    || StructureDeclaresInclude(element)
-                    || extends is not null,
-                // 继承定义的部件可以省略 tag：读入时先按透明部件保留，合并时再从父部件继承。
-                inheritTag: extends is not null)
+            Structure = structure
         };
     }
 
@@ -1906,11 +1962,11 @@ public static class UserBlockElementsSerializer
 
         if (requireContentSlot && !UserBlockStructureRules.HasContentSlot(sanitized.Structure))
         {
-            // 没有正文槽位时正文无处可放；明确回退内置模板，而不是把正文塞到别处或静默丢弃。
+            // 没有正文槽位时正文无处可放；围栏定义必须有正文槽才能装载，否则直接拒载。
             diagnostics.Add(Diagnostic(
-                DiagnosticSeverity.Warning,
+                DiagnosticSeverity.Error,
                 "USER_ELEMENTS_STRUCTURE_NO_CONTENT",
-                $"用户元素 '{definitionId}' 的结构缺少正文槽位（body/content），已回退内置模板。"));
+                $"用户元素 '{definitionId}' 的结构缺少正文槽位（body/content），已跳过该定义。"));
             return UserBlockStructure.Empty;
         }
 

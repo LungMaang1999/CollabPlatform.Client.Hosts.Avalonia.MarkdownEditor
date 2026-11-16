@@ -119,7 +119,7 @@
       </attribute>
     </attributes>
     <structure>
-      <part slot="root" addressable="false" tag="{header-tag}" content="tight-children"/>
+      <part slot="root" addressable="false" tag="{header-tag}" content="tight-children" css="cell-align"/>
     </structure>
   </element>
 

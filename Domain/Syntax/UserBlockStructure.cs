@@ -532,7 +532,8 @@ public static class UserBlockStructureRules
     public static IReadOnlySet<string> CssRecipes { get; } =
         new HashSet<string>(StringComparer.Ordinal)
         {
-            "align-block", "align-inline", "table-row-vars", "math-vars", "matrix-vars",
+            "align-block", "align-inline", "table-row-vars", "cell-align",
+            "math-vars", "matrix-vars",
             "accent-adm", "accent-cb", "timeline-vars",
         };
 

@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Diagnostics;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Documents;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Editing;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Parsing;
@@ -38,6 +39,11 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
     private IDocumentRenderer? _activeRenderer;
     private bool _isBusy;
     private string? _errorMessage;
+
+    // 综合诊断集合：加载期 + 渲染期两路汇聚，宿主消费此集合而不是 StatusText 字符串。
+    private IReadOnlyList<DiagnosticMessage> _loadDiagnostics = [];
+    private IReadOnlyList<DiagnosticMessage> _renderDiagnostics = [];
+    private IReadOnlyList<DiagnosticMessage> _currentDiagnostics = [];
 
     // 1 = 下一帧必须输出全量（页面刷新/JS reset 自愈），由渲染任务消费。
     private int _forceFullPreviewRender;
@@ -218,17 +224,48 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
     public void ReportError(string? message) => ErrorMessage = message;
 
     /// <summary>
-    /// 打开期的伴随文件/自定义元素诊断：优先展示聚合摘要（如“3 个元素定义问题、
-    /// 2 处内容违规”），明细保留在 <see cref="IDocumentService.CurrentLoadDiagnostics"/>。
-    /// 不中断文档显示；正常打开不覆盖已有错误信息。
+    /// 打开期的伴随文件/自定义元素诊断：保存到综合集合并触发合并；
+    /// 状态栏 ErrorMessage 仍保留聚合摘要供向后兼容。
     /// </summary>
     private void ReportLoadDiagnostics()
     {
-        var diagnostics = _documentService.CurrentLoadDiagnostics;
-        if (diagnostics.Count == 0) return;
+        _loadDiagnostics = _documentService.CurrentLoadDiagnostics;
+        ApplyDiagnostics();
 
-        ErrorMessage = _documentService.CurrentLoadDiagnosticsSummary
-            ?? string.Join(" | ", diagnostics.Select(message => message.Message));
+        if (_loadDiagnostics.Count > 0)
+        {
+            ErrorMessage = _documentService.CurrentLoadDiagnosticsSummary
+                ?? string.Join(" | ", _loadDiagnostics.Select(message => message.Message));
+        }
+    }
+
+    /// <summary>
+    /// 当前综合诊断集合（加载期 + 最近一次渲染期）。按严重度降序、Range 升序排列。
+    /// 宿主消费此集合渲染诊断列表，不再依赖 StatusText 拼接字符串。
+    /// </summary>
+    public IReadOnlyList<DiagnosticMessage> CurrentDiagnostics => _currentDiagnostics;
+
+    public int DiagnosticCount => _currentDiagnostics.Count;
+
+    public bool HasDiagnostics => _currentDiagnostics.Count > 0;
+
+    /// <summary>
+    /// 刷新综合诊断集合：合并加载期与渲染期两路，排序并触发 PropertyChanged。
+    /// 每次任一路更新后必须在 UI 线程调用。
+    /// </summary>
+    private void ApplyDiagnostics()
+    {
+        var combined = _loadDiagnostics
+            .Concat(_renderDiagnostics)
+            .OrderByDescending(d => d.Severity)
+            .ThenBy(d => d.Range.StartLine)
+            .ThenBy(d => d.Range.StartColumn)
+            .ToArray();
+
+        _currentDiagnostics = combined;
+        OnPropertyChanged(nameof(CurrentDiagnostics));
+        OnPropertyChanged(nameof(DiagnosticCount));
+        OnPropertyChanged(nameof(HasDiagnostics));
     }
 
     public CommandManager CommandManager => _commandManager;
@@ -852,9 +889,11 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
                     // StyleResolver 内部自取锁。稳态帧只产块级补丁。
                     string? fullHtml = null;
                     string? patchJson = null;
+                    IReadOnlyList<DiagnosticMessage> renderDiags = [];
                     if (!effectiveFull && renderer is IIncrementalPreviewRenderer incrementalRenderer)
                     {
                         var incremental = incrementalRenderer.RenderIncremental(doc);
+                        renderDiags = incremental.Diagnostics;
                         if (incremental.IsPatch)
                         {
                             patchJson = incremental.Patch!.ToPayloadJson();
@@ -866,7 +905,9 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
                     }
                     else
                     {
-                        fullHtml = renderer.Render(doc).Html;
+                        var full = renderer.Render(doc);
+                        fullHtml = full.Html;
+                        renderDiags = full.Diagnostics;
                     }
 
                     _lastRenderedPreviewVersion = previewVersion;
@@ -876,6 +917,10 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
                     {
                         if (token.IsCancellationRequested || previewVersion != Volatile.Read(ref _previewVersion) || _isDisposed)
                             return;
+
+                        // 渲染期诊断与加载期合并。
+                        _renderDiagnostics = renderDiags;
+                        ApplyDiagnostics();
 
                         _lastPublishedRenderVersion = previewVersion;
                         _publishedPreviewVersion++;
