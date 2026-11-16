@@ -49,7 +49,7 @@ internal enum PartGeneratorPhase
 }
 
 /// <summary>
-/// P12 生成器上下文。算法只产出「内容 + 受控生成属性」：
+/// 生成器上下文。算法只产出「内容 + 受控生成属性」：
 /// 标签、class、节点身份、内联样式与类型级绑定仍由模板发射器统一处理，
 /// 生成器不得自行开闭根元素，也不得按类型名分派。
 /// </summary>
@@ -304,7 +304,7 @@ internal sealed class PartTemplate
 
     /// <summary>
     /// 是否输出 <c>data-part</c>。内置类型当前一律不输出（其输出由直出代码决定），
-    /// 因此 P0-2 铺开的描述全部为 false；迁移时保持 false 才能保证字节不变。
+    /// 因此描述通道登记这些部件时全部为 false；改动会让输出多出属性、破坏字节基线。
     /// 已登记模板（Quote/Custom/Timeline）保持 true。
     /// </summary>
     public bool Addressable { get; init; } = true;
@@ -325,8 +325,8 @@ internal sealed class PartTemplate
 
     /// <summary>
     /// 根部件是否输出节点身份属性（<c>data-node-id</c> / 行区间 / 未闭合标记）与实例样式。
-    /// 现状输出里不携带节点身份的根（如 <c>br</c>、脚注组 <c>section</c>）在迁移时置 false，
-    /// 直出分支的字节才不会被模板补上属性。
+    /// 现状输出里不携带节点身份的根（如 <c>br</c>、脚注组 <c>section</c>）置 false，
+    /// 输出才不会多出属性。
     /// </summary>
     public bool EmitNodeIdentity { get; set; } = true;
 
@@ -433,12 +433,12 @@ internal sealed class PartTemplate
     public string? EmitWhenCollection { get; set; }
 
     /// <summary>
-    /// P12 生成器名（固定注册表）。非空时由注册表按名字取算法产出本部件的内容与生成属性；
+    /// 生成器名（固定注册表）。非空时由注册表按名字取算法产出本部件的内容与生成属性；
     /// 为空时走内容槽。名字合法性由 <see cref="UserBlockStructureRules.TryNormalizeGenerator"/> 校验。
     /// </summary>
     public string? Generator { get; set; }
 
-    /// <summary>P12 封闭参数串（<c>k=v;k=v</c>）；只有声明了 <see cref="Generator"/> 才有效。</summary>
+    /// <summary>封闭参数串（<c>k=v;k=v</c>）；只有声明了 <see cref="Generator"/> 才有效。</summary>
     public string? GeneratorParams { get; set; }
 
     public List<PartTemplate> Children { get; } = [];
@@ -457,9 +457,9 @@ internal sealed class ElementTemplate
     public required PartTemplate Root { get; init; }
 
     /// <summary>
-    /// 是否参与渲染。P0-2 只铺描述通道：未迁移类型登记描述但置 false，
+    /// 是否参与渲染。描述通道：未迁移类型登记描述但置 false，
     /// <c>TryRenderTemplate</c> 必须跳过，输出仍由原直出代码决定。
-    /// 迁移某个类型时（字节对照通过后）再把该类型翻成 true。
+    /// 某类型改为模板驱动（字节对照通过后）才翻成 true。
     /// </summary>
     public bool RenderEnabled { get; init; } = true;
 

@@ -14,7 +14,7 @@ namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Graph;
 /// </summary>
 public static class GraphCompositeExpander
 {
-    /// <summary>跨图复合引用成环。与装载期校验共用同一个码，不并入 L4 的单图环码。</summary>
+    /// <summary>跨图复合引用成环。与装载期校验共用同一个码，不并入单图环码。</summary>
     public const string CycleCode = "graph.composite_cycle";
 
     /// <summary>端口映射指向不存在的内层节点 / 端口。</summary>

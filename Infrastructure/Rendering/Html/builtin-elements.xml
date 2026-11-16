@@ -609,8 +609,8 @@
         <attribute name="rel" value-source="constant" constant="noopener noreferrer" when="absolute-http"/>
       </tag>
       <!-- 图片：只认 http/https 与相对路径；data: / file: 由机制地板拒绝。
-           这与 md 图片允许 data:image/ 的既存口径不同，原因见
-           docs/inline-html-allowlist.md「为什么手写 <img> 不允许 data:」。 -->
+           这与 md 图片允许 data:image/ 的既存口径不同：md 图片的 data: 受解析器限定 MIME 前缀，
+           而手写 <img> 的 src 可被注入任意协议，data: 等同于脚本执行面。 -->
       <tag name="img" void="true">
         <attribute name="src" kind="url" protocols="http,https" max-length="2048"/>
         <attribute name="alt"/>

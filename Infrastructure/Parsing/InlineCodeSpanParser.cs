@@ -8,7 +8,7 @@ using Markdig.Syntax.Inlines;
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Parsing;
 
 /// <summary>
-/// T3 行内接管的第一片叶子：代码段（CommonMark §6.3）。
+/// 行内接管的第一片叶子：代码段（CommonMark §6.3）。
 /// <para>
 /// 代码段是“叶子”而不是开/闭配对构造：它不向 Markdig 的 <c>DelimiterStack</c> 压任何定界符，
 /// 只在一段连续文本内向前找“等长反引号串”并一次吞掉整段。因此接管它不需要复制分隔符栈，

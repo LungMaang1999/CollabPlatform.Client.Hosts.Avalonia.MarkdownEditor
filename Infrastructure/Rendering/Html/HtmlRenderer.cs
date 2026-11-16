@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
@@ -44,7 +44,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
     // 变体只改外形：同一匹配下缺某个变体时沿用 Default 变体的结构（与历史单模板行为一致）。
     private readonly Dictionary<(NodeType NodeType, TemplateSelectorMatch Match, ElementTemplateVariant Variant), ElementTemplate> _selectedTemplates = new();
 
-    // P12 命名生成器注册表：渲染路径只按名字取算法，不出现按 NodeType 的分派。
+    // 命名生成器注册表：渲染路径只按名字取算法，不出现按 NodeType 的分派。
     private readonly Dictionary<string, PartGenerator> _generators = new(StringComparer.Ordinal);
 
     private sealed record TemplateSelectorBinding(
@@ -76,6 +76,9 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
 
     /// <summary>结构覆盖只作用于单块渲染的目标节点，子节点仍按各自模板渲染。</summary>
     private MarkdownNode? _structureOverrideNode;
+    private ElementDefinitionInputStamp? _definitionStamp;
+    private ElementDefinitionFingerprintSet? _definitionSet;
+    private MarkdownNode? _kindScopeWitness;
 
     public HtmlRenderer(
         IStyleResolver styleResolver,
@@ -93,7 +96,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
     }
 
     /// <summary>
-    /// P12 生成算法注册表。键固定为 <c>UserBlockStructure</c> 中的生成器名；
+    /// 生成算法注册表。键固定为 <c>UserBlockStructure</c> 中的生成器名；
     /// 算法只写内容与生成属性，不接管标签/class/节点身份。
     /// </summary>
     private void RegisterGenerators()
@@ -111,10 +114,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         ArgumentNullException.ThrowIfNull(document);
 
         var icons = _iconOptions.Snapshot();
-        var definitions = ElementDefinitionFingerprint.ComputeSet(
-            document.StyleSheet,
-            document.EffectiveUserBlockDefinitions,
-            document.GraphStages);
+        var definitions = GetDefinitions(document);
         var hasKindScopedElements = HasKindScopedElements(document.Root);
         var ctx = RenderCore(document, assembleHtml: true, icons, definitions, hasKindScopedElements);
 
@@ -139,10 +139,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
 
         // 一次渲染只取一次图标快照：纪元指纹与后续字形都从它读，避免不同源。
         var icons = _iconOptions.Snapshot();
-        var definitions = ElementDefinitionFingerprint.ComputeSet(
-            document.StyleSheet,
-            document.EffectiveUserBlockDefinitions,
-            document.GraphStages);
+        var definitions = GetDefinitions(document);
         var hasKindScopedElements = HasKindScopedElements(document.Root);
         var epoch = CreateEpoch(definitions, icons, hasKindScopedElements);
 
@@ -166,6 +163,8 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         }
 
         var ctx = RenderCore(document, assembleHtml: false, icons, definitions, hasKindScopedElements);
+        var prefixCount = _prefixCursor;
+        var reuseFrame = _reuseFrame;
         LastBlockCacheStats = ctx.Counters;
 
         // 类型级帧策略：本帧变更块只要包含 ForceFull 类型，就放弃补丁帧改走全量。
@@ -180,8 +179,13 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         // 出现无法按 id 寻址的块（空/非元素片段）或补丁性价比不足时回退全量。
         if (!ctx.SawNonCacheableBlock)
         {
-            var ops = BuildPatchOps(baseline, ctx.OrderedIds, ctx.FrameBlocks, out var payloadChars);
-            var fullLengthEstimate = 0L;
+            if (!TryBuildSuffixPatch(baseline, ctx, prefixCount, out var ops, out var payloadChars))
+            {
+                var blocks = MaterializeFrameBlocks(reuseFrame, prefixCount, ctx.FrameBlocks);
+                ops = BuildPatchOps(baseline, ctx.OrderedIds, blocks, out payloadChars);
+            }
+
+            var fullLengthEstimate = PrefixFragmentChars(reuseFrame, prefixCount);
             foreach (var fb in ctx.FrameBlocks)
             {
                 fullLengthEstimate += fb.Fragment.Length;
@@ -220,6 +224,8 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         lock (_blockCacheGate)
         {
             _baseline = null;
+            _prefixFrame = null;
+            _kindScopeWitness = null;
             _forceFullNext = true;
         }
     }
@@ -322,26 +328,107 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
     /// 判断文档是否需要“kind 级图标作用域”：存在 custom-kind 不属于内置自定义内容块类别的
     /// 自定义元素。内置类别（info/success/...）沿用旧的全局图标纪元，保证既有输出与基线不变。
     /// </summary>
-    private static bool HasKindScopedElements(MarkdownNode node)
+    private ElementDefinitionFingerprintSet GetDefinitions(MarkdownDocument document)
     {
-        if (node.Type == NodeType.Custom)
+        var sheet = document.StyleSheet;
+        var blocks = document.EffectiveUserBlockDefinitions;
+        var stages = document.GraphStages;
+        // 缺省样式是指纹输入的一部分；必须先补齐，否则命中判断看到的集合和 ComputeSet 不一致。
+        sheet.GetOrCreateDefault();
+        if (_definitionSet is not null
+            && _definitionStamp is not null
+            && _definitionStamp.Matches(sheet, blocks, stages))
         {
-            var kind = ElementKind.Resolve(node);
-            if (kind is not null && !AdmonitionCatalog.CustomBlockKinds.Contains(kind))
+            return _definitionSet;
+        }
+
+        var set = ElementDefinitionFingerprint.ComputeSet(sheet, blocks, stages);
+        _definitionStamp = ElementDefinitionInputStamp.Capture(sheet, blocks, stages);
+        _definitionSet = set;
+        return set;
+    }
+
+    /// <summary>
+    /// 判断文档是否需要“kind 级图标作用域”。上一帧的 witness 只有在仍挂在当前根的子节点链上，
+    /// 且 kind 仍是非内置自定义 kind 时才能短路；上一帧为 false 不能跳过，流式追加会加节点。
+    /// 直接 <c>Children.Remove</c> 不会清 Parent，所以父链之外还要核对每一跳仍在 Children 里。
+    /// </summary>
+    private bool HasKindScopedElements(MarkdownNode root)
+    {
+        var witness = _kindScopeWitness;
+        if (witness is not null && IsKindScoped(witness) && IsAttached(witness, root))
+        {
+            return true;
+        }
+
+        witness = FindKindScopeWitness(root);
+        _kindScopeWitness = witness;
+        return witness is not null;
+    }
+
+    private static bool IsKindScoped(MarkdownNode node)
+    {
+        if (node.Type != NodeType.Custom)
+        {
+            return false;
+        }
+
+        var kind = ElementKind.Resolve(node);
+        return kind is not null && !AdmonitionCatalog.CustomBlockKinds.Contains(kind);
+    }
+
+    private static bool IsAttached(MarkdownNode node, MarkdownNode root)
+    {
+        const int maxParentHops = 1024;
+        var hops = 0;
+        for (var current = node; current is not null; current = current.Parent)
+        {
+            if (ReferenceEquals(current, root))
             {
                 return true;
             }
+
+            var parent = current.Parent;
+            if (parent is null || !ContainsChild(parent, current) || ++hops > maxParentHops)
+            {
+                return false;
+            }
         }
 
-        for (var i = 0; i < node.Children.Count; i++)
+        return false;
+    }
+
+    private static bool ContainsChild(MarkdownNode parent, MarkdownNode child)
+    {
+        var children = parent.Children;
+        for (var i = 0; i < children.Count; i++)
         {
-            if (HasKindScopedElements(node.Children[i]))
+            if (ReferenceEquals(children[i], child))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    private static MarkdownNode? FindKindScopeWitness(MarkdownNode node)
+    {
+        if (IsKindScoped(node))
+        {
+            return node;
+        }
+
+        for (var i = 0; i < node.Children.Count; i++)
+        {
+            var found = FindKindScopeWitness(node.Children[i]);
+            if (found is not null)
+            {
+                return found;
+            }
+        }
+
+        return null;
     }
 
     private sealed record BlockEntry(
@@ -392,6 +479,10 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
     private readonly object _blockCacheGate = new();
     private readonly Dictionary<string, BlockEntry> _blockCache = new(StringComparer.Ordinal);
     private IncrementalBaseline? _baseline;
+    private PrefixFrame? _prefixFrame;
+    private PrefixFrame? _reuseFrame;
+    private int _prefixCursor;
+    private bool _prefixOpen;
     private bool _forceFullNext;
 
     private RenderContext RenderCore(
@@ -402,6 +493,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         bool hasKindScopedElements)
     {
         var ctx = CreateContext(document, assembleHtml, icons, definitions, hasKindScopedElements);
+        BeginPrefixReuse(document, ctx);
 
         // 模板变体与图标快照都来自当前文档/当前配置；渲染同步执行，结束后恢复外层状态。
         ExecuteWithDocumentState(document, icons, () =>
@@ -412,6 +504,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         });
 
         SweepStaleBlockFragments(ctx.LiveIds);
+        PublishPrefixFrame(document, ctx);
         return ctx;
     }
 
@@ -473,10 +566,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         ArgumentNullException.ThrowIfNull(node);
 
         var icons = _iconOptions.Snapshot();
-        var definitions = ElementDefinitionFingerprint.ComputeSet(
-            document.StyleSheet,
-            document.EffectiveUserBlockDefinitions,
-            document.GraphStages);
+        var definitions = GetDefinitions(document);
         var ctx = CreateContext(document, assembleHtml: true, icons, definitions, HasKindScopedElements(document.Root));
 
         ExecuteWithDocumentState(document, icons, () =>
@@ -511,10 +601,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         ArgumentNullException.ThrowIfNull(node);
 
         var icons = _iconOptions.Snapshot();
-        var definitions = ElementDefinitionFingerprint.ComputeSet(
-            document.StyleSheet,
-            document.EffectiveUserBlockDefinitions,
-            document.GraphStages);
+        var definitions = GetDefinitions(document);
         ElementTemplateSnapshot? snapshot = null;
 
         ExecuteWithDocumentState(document, icons, () =>
@@ -658,6 +745,10 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
     private void RenderBlockBoundary(MarkdownNode node, RenderContext ctx)
     {
         ctx.Counters = ctx.Counters with { Total = ctx.Counters.Total + 1 };
+        if (TryReusePrefixBlock(node, ctx))
+        {
+            return;
+        }
 
         BlockEntry? entry;
         lock (_blockCacheGate)
@@ -768,6 +859,299 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
             Node = node,
             PreviousSignature = entry?.Signature
         });
+    }
+
+    // 已发布的完整块按 64 个一组冻结。整组都落在未断开的复用前缀里时直接共享数组，
+    // 只为变化边界重新分配。已发布的组不能原地改：本帧补丁失败时还要读上一帧。
+    private const int PrefixChunkShift = 6;
+    private const int PrefixChunkSize = 1 << PrefixChunkShift;
+    private const int PrefixChunkMask = PrefixChunkSize - 1;
+
+    /// <summary>
+    /// 上一帧具体块的扁平快照。流式解析按引用复用未变前缀时，下一帧直接复用片段，
+    /// 不再逐块加锁、查缓存或分配 <see cref="FrameBlock"/>。
+    /// </summary>
+    private sealed class PrefixFrame
+    {
+        public required MarkdownDocument Document { get; init; }
+        public required CacheEpoch Epoch { get; init; }
+        public required long StyleRevision { get; init; }
+        public required string DefinitionAggregate { get; init; }
+        public required string IconStamp { get; init; }
+        public required bool ScopeIconsPerBlock { get; init; }
+        public required MarkdownNode[][] Nodes { get; init; }
+        public required string[][] Ids { get; init; }
+        public required string[][] Fragments { get; init; }
+        public required string[][] Signatures { get; init; }
+        public required int Count { get; init; }
+
+        public MarkdownNode NodeAt(int index)
+            => Nodes[index >> PrefixChunkShift][index & PrefixChunkMask];
+
+        public string IdAt(int index)
+            => Ids[index >> PrefixChunkShift][index & PrefixChunkMask];
+
+        public string FragmentAt(int index)
+            => Fragments[index >> PrefixChunkShift][index & PrefixChunkMask];
+
+        public string SignatureAt(int index)
+            => Signatures[index >> PrefixChunkShift][index & PrefixChunkMask];
+    }
+
+    private void BeginPrefixReuse(MarkdownDocument document, RenderContext ctx)
+    {
+        PrefixFrame? frame;
+        lock (_blockCacheGate)
+        {
+            frame = _prefixFrame;
+        }
+
+        _reuseFrame = frame;
+        _prefixCursor = 0;
+        _prefixOpen = frame is not null
+            && ReferenceEquals(frame.Document, document)
+            && frame.Epoch.Equals(ctx.Epoch)
+            && frame.StyleRevision == ctx.StyleRevision
+            && string.Equals(frame.DefinitionAggregate, ctx.Definitions.Aggregate, StringComparison.Ordinal)
+            && string.Equals(frame.IconStamp, IconStampFor(ctx), StringComparison.Ordinal)
+            && frame.ScopeIconsPerBlock == ctx.ScopeIconsPerBlock;
+    }
+
+    /// <summary>
+    /// 前缀未断且节点仍是上一帧那个对象时，片段与签名都不可能变。
+    /// 引用结构依赖同 kind 出现顺序，不能纳入这条路径。
+    /// </summary>
+    private bool TryReusePrefixBlock(MarkdownNode node, RenderContext ctx)
+    {
+        if (!_prefixOpen || _reuseFrame is not { } frame)
+        {
+            return false;
+        }
+
+        if (_prefixCursor >= frame.Count
+            || !ReferenceEquals(frame.NodeAt(_prefixCursor), node)
+            || NodeStructureUsesRef(node))
+        {
+            _prefixOpen = false;
+            return false;
+        }
+
+        var index = _prefixCursor++;
+        ctx.Counters = ctx.Counters with
+        {
+            MemoHits = ctx.Counters.MemoHits + 1,
+            FromCache = ctx.Counters.FromCache + 1
+        };
+        if (ctx.AssembleHtml)
+        {
+            ctx.Html!.Append(frame.FragmentAt(index));
+        }
+
+        var id = frame.IdAt(index);
+        ctx.LiveIds.Add(id);
+        ctx.OrderedIds.Add(id);
+        return true;
+    }
+
+    private void PublishPrefixFrame(MarkdownDocument document, RenderContext ctx)
+    {
+        if (ctx.SawNonCacheableBlock || ctx.OrderedIds.Count != _prefixCursor + ctx.FrameBlocks.Count)
+        {
+            lock (_blockCacheGate)
+            {
+                _prefixFrame = null;
+            }
+
+            return;
+        }
+
+        if (_prefixCursor == ctx.OrderedIds.Count && _reuseFrame is not null && _prefixOpen)
+        {
+            return;
+        }
+
+        var count = ctx.OrderedIds.Count;
+        var chunkCount = (count + PrefixChunkMask) >> PrefixChunkShift;
+        var nodes = new MarkdownNode[chunkCount][];
+        var ids = new string[chunkCount][];
+        var fragments = new string[chunkCount][];
+        var signatures = new string[chunkCount][];
+        var reuse = _prefixCursor > 0 ? _reuseFrame : null;
+        for (var chunk = 0; chunk < chunkCount; chunk++)
+        {
+            var start = chunk << PrefixChunkShift;
+            var length = Math.Min(PrefixChunkSize, count - start);
+            if (reuse is not null
+                && length == PrefixChunkSize
+                && start + PrefixChunkSize <= _prefixCursor
+                && start + PrefixChunkSize <= reuse.Count
+                && chunk < reuse.Nodes.Length
+                && reuse.Nodes[chunk].Length == PrefixChunkSize)
+            {
+                nodes[chunk] = reuse.Nodes[chunk];
+                ids[chunk] = reuse.Ids[chunk];
+                fragments[chunk] = reuse.Fragments[chunk];
+                signatures[chunk] = reuse.Signatures[chunk];
+                continue;
+            }
+
+            var chunkNodes = new MarkdownNode[length];
+            var chunkIds = new string[length];
+            var chunkFragments = new string[length];
+            var chunkSignatures = new string[length];
+            var copied = reuse is null ? 0 : Math.Min(length, Math.Max(0, _prefixCursor - start));
+            for (var i = 0; i < copied; i++)
+            {
+                var index = start + i;
+                chunkNodes[i] = reuse!.NodeAt(index);
+                chunkIds[i] = reuse.IdAt(index);
+                chunkFragments[i] = reuse.FragmentAt(index);
+                chunkSignatures[i] = reuse.SignatureAt(index);
+            }
+
+            for (var i = copied; i < length; i++)
+            {
+                var block = ctx.FrameBlocks[start + i - _prefixCursor];
+                chunkNodes[i] = block.Node;
+                chunkIds[i] = block.Id;
+                chunkFragments[i] = block.Fragment;
+                chunkSignatures[i] = block.Signature;
+            }
+
+            nodes[chunk] = chunkNodes;
+            ids[chunk] = chunkIds;
+            fragments[chunk] = chunkFragments;
+            signatures[chunk] = chunkSignatures;
+        }
+
+        var published = new PrefixFrame
+        {
+            Document = document,
+            Epoch = ctx.Epoch,
+            StyleRevision = ctx.StyleRevision,
+            DefinitionAggregate = ctx.Definitions.Aggregate,
+            IconStamp = IconStampFor(ctx),
+            ScopeIconsPerBlock = ctx.ScopeIconsPerBlock,
+            Nodes = nodes,
+            Ids = ids,
+            Fragments = fragments,
+            Signatures = signatures,
+            Count = count
+        };
+
+        lock (_blockCacheGate)
+        {
+            _prefixFrame = published;
+        }
+    }
+
+    /// <summary>
+    /// 只在“公共前缀之后的旧块全部消失”时生成补丁。此时幸存块相对顺序不变，
+    /// 与 <see cref="BuildPatchOps"/> 一样只有 Remove 和 Upsert，没有 Move。
+    /// 中间插入、删除或换序返回 false，调用方回退全量比较。
+    /// </summary>
+    private static bool TryBuildSuffixPatch(
+        IncrementalBaseline baseline,
+        RenderContext ctx,
+        int prefixCount,
+        out List<PreviewPatchOp> ops,
+        out long payloadChars)
+    {
+        ops = new List<PreviewPatchOp>();
+        payloadChars = 0;
+        var previous = baseline.OrderedIds;
+        var current = ctx.OrderedIds;
+        if (prefixCount < 0 || ctx.FrameBlocks.Count != current.Count - prefixCount)
+        {
+            return false;
+        }
+
+        var common = 0;
+        var limit = Math.Min(previous.Count, current.Count);
+        while (common < limit
+               && string.Equals(previous[common], current[common], StringComparison.Ordinal))
+        {
+            common++;
+        }
+
+        // 复用前缀必须也是基线 Id 前缀；否则幸存块的 PreviousSignature 不在这条路径上。
+        if (common < prefixCount)
+        {
+            return false;
+        }
+
+        for (var i = common; i < previous.Count; i++)
+        {
+            if (ctx.LiveIds.Contains(previous[i]))
+            {
+                return false;
+            }
+        }
+
+        for (var i = common; i < previous.Count; i++)
+        {
+            ops.Add(new PreviewPatchOp(previous[i], PreviewPatchOpKind.Remove));
+            payloadChars += EstimatedOpOverhead;
+        }
+
+        for (var i = prefixCount; i < current.Count; i++)
+        {
+            var block = ctx.FrameBlocks[i - prefixCount];
+            if (i < common && !block.SignatureChanged)
+            {
+                continue;
+            }
+
+            var afterId = i > 0 ? current[i - 1] : null;
+            ops.Add(new PreviewPatchOp(block.Id, PreviewPatchOpKind.Upsert, afterId, block.Fragment));
+            payloadChars += EstimatedOpOverhead + block.Fragment.Length;
+        }
+
+        return true;
+    }
+
+    private static List<FrameBlock> MaterializeFrameBlocks(
+        PrefixFrame? reuseFrame,
+        int prefixCount,
+        List<FrameBlock> tail)
+    {
+        if (prefixCount == 0 || reuseFrame is null)
+        {
+            return tail;
+        }
+
+        var merged = new List<FrameBlock>(prefixCount + tail.Count);
+        for (var i = 0; i < prefixCount; i++)
+        {
+            merged.Add(new FrameBlock
+            {
+                Id = reuseFrame.IdAt(i),
+                Fragment = reuseFrame.FragmentAt(i),
+                Signature = reuseFrame.SignatureAt(i),
+                Node = reuseFrame.NodeAt(i),
+                PreviousSignature = reuseFrame.SignatureAt(i)
+            });
+        }
+
+        merged.AddRange(tail);
+        return merged;
+    }
+
+    private static long PrefixFragmentChars(PrefixFrame? reuseFrame, int prefixCount)
+    {
+        if (reuseFrame is null || prefixCount <= 0)
+        {
+            return 0;
+        }
+
+        long total = 0;
+        var count = Math.Min(prefixCount, reuseFrame.Count);
+        for (var i = 0; i < count; i++)
+        {
+            total += reuseFrame.FragmentAt(i).Length;
+        }
+
+        return total;
     }
 
     // 比较上一帧与本帧的有序块序列，生成最小块级操作：先删除消失块，
@@ -4193,7 +4577,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         html.Append("</").Append(tag).Append('>');
     }
 
-    /// <summary>P12 公式生成器：原文进 <c>data-tex</c>，正文是原文（转义由生成器负责）。</summary>
+    /// <summary>公式生成器：原文进 <c>data-tex</c>，正文是原文（转义由生成器负责）。</summary>
     private static void WriteMathGenerator(PartGeneratorContext context)
     {
         var formula = context.Source ?? string.Empty;
@@ -4325,7 +4709,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         return c;
     }
 
-    /// <summary>P12 Mermaid 生成器：源文本进 <c>data-diagram</c>，正文是源文本。</summary>
+    /// <summary>Mermaid 生成器：源文本进 <c>data-diagram</c>，正文是源文本。</summary>
     private static void WriteMermaidGenerator(PartGeneratorContext context)
     {
         var source = (context.Source ?? string.Empty).TrimEnd('\r', '\n');
@@ -4339,7 +4723,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         context.Html.Append(WebUtility.HtmlEncode(source));
     }
 
-    /// <summary>P12 图片矩阵生成器：按行/格产出内容；外层容器与状态类由描述负责。</summary>
+    /// <summary>图片矩阵生成器：按行/格产出内容；外层容器与状态类由描述负责。</summary>
     private static void WriteImageMatrixGenerator(PartGeneratorContext context)
     {
         if (context.Phase == PartGeneratorPhase.Attributes)
@@ -4360,7 +4744,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         }
     }
 
-    /// <summary>P12 二维码生成器：完整内容进 <c>data-tip</c>，正文是 SVG/占位/错误块。</summary>
+    /// <summary>二维码生成器：完整内容进 <c>data-tip</c>，正文是 SVG/占位/错误块。</summary>
     private static void WriteQrCodeGenerator(PartGeneratorContext context)
     {
         // 块体文本即二维码承载内容（链接 / 任意文本）。
@@ -4576,7 +4960,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
     /// 渲染雷达图：解析围栏内表格，生成内联 SVG（同心网格 + 轴线 + 系列多边形 + 可选数值标签），
     /// 标题与底部图例用 HTML 承载以便文本排版。数据非法时显示占位提示。
     /// </summary>
-    /// <summary>P12 雷达图生成器：解析围栏内表格并生成图表内容；外层 figure 由描述负责。</summary>
+    /// <summary>雷达图生成器：解析围栏内表格并生成图表内容；外层 figure 由描述负责。</summary>
     private static void WriteRadarGenerator(PartGeneratorContext context)
     {
         if (context.Phase == PartGeneratorPhase.Attributes)

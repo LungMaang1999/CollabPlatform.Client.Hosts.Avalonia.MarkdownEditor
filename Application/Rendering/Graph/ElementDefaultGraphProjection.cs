@@ -31,7 +31,7 @@ public static class ElementDefaultGraphProjection
 {
     /// <summary>
     /// 无法从单张快照等价还原的类型：快照只反映样张实例，结构随层级/变体/列数变化。
-    /// 这里的 <see cref="ElementManualCorrection.Expected"/> 是 R1 之后要补的参数形态。
+    /// 这里的 <see cref="ElementManualCorrection.Expected"/> 是图求值侧待补的参数形态。
     /// </summary>
     public static IReadOnlyList<ElementManualCorrection> ManualCorrections { get; } =
     [

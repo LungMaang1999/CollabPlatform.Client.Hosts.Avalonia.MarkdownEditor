@@ -60,7 +60,7 @@ public sealed record UserBlockPart
 
     /// <summary>
     /// 白名单内的标签名（小写），或 schema v2 的受控插值 <c>{field}</c> /
-    /// <c>前缀{field}</c>（如 <c>h{level}</c>）。本轮只允许一个洞；
+    /// <c>前缀{field}</c>（如 <c>h{level}</c>）。当前只允许一个洞；
     /// 前缀限安全字符且不超长，展开后的完整标签仍须落在标签白名单内。
     /// </summary>
     /// <summary>
@@ -1008,7 +1008,7 @@ public static class UserBlockStructureRules
 
     /// <summary>
     /// 标签是否为受控插值模板：<c>{field}</c> 或“字面前缀 + 单个 <c>{field}</c>”（如 <c>h{level}</c>）。
-    /// 本轮只允许一个洞；多个洞、拆段拼接、表达式一律不算模板。
+    /// 当前只允许一个洞；多个洞、拆段拼接、表达式一律不算模板。
     /// </summary>
     public static bool IsTagExpression(string? tag) => TryParseTagTemplate(tag, out _, out _);
 

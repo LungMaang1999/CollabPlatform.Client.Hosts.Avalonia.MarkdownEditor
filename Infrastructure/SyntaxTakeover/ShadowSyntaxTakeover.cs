@@ -10,16 +10,16 @@ using Markdig;
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.SyntaxTakeover;
 
 /// <summary>
-/// 语法接管第一档（T1）的影子解析链：与生产 <see cref="MarkdownParser"/> 并行运行，
+/// 影子解析链：与生产 <see cref="MarkdownParser"/> 并行运行，
 /// 只替换围栏识别器（<see cref="FenceDispatchParser"/>、
 /// <see cref="ShadowUserBlockParser"/>），转换器、章节装配、渲染器全部复用同一条实现。
-/// 供影子双跑取证使用，不进入任何生产路径；关闭即回到 MarkdownParser。
+/// 仅供对照双跑，不进入任何生产路径；关闭即回到 MarkdownParser。
 /// </summary>
 public static class ShadowSyntaxTakeover
 {
     /// <summary>
     /// 按生产管线的注册次序构建影子管线：选项扩展逐一对应，
-    /// 仅把 T1 的两个围栏解析器换成影子实现，其余扩展点顺序保持逐项一致。
+    /// 仅把两个围栏解析器换成影子实现，其余扩展点顺序保持逐项一致。
     /// </summary>
     public static MarkdownPipeline BuildPipeline(
         MarkdownParserOptions options,

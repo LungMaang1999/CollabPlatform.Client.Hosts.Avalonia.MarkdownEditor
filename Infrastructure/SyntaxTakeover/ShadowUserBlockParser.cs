@@ -7,7 +7,7 @@ using Markdig.Syntax;
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.SyntaxTakeover;
 
 /// <summary>
-/// 影子解析链的 T1 定义围栏识别器（<c>:::kind key=value</c>、<c>'''kind</c>、<c>```kind</c>）。
+/// 影子解析链的定义围栏识别器（<c>:::kind key=value</c>、<c>'''kind</c>、<c>```kind</c>）。
 /// 名称解析、围栏长度、优先级与嵌套上限全部在本类内独立实现，
 /// 不复用生产 <see cref="UserBlockParser"/> 的判定代码，从而使双跑对比真实有效。
 /// 每个实例只认一个围栏字符，与生产管线的“一族一个解析器”保持一致。

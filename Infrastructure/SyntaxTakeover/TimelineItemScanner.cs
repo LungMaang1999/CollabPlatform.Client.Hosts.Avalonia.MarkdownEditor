@@ -4,7 +4,7 @@ using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax;
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.SyntaxTakeover;
 
 /// <summary>
-/// T1 的 <c>@@</c> 条目切分：把 <c>'''timeline</c> 围栏体按标记行切成条目切片。
+/// <c>@@</c> 条目切分：把 <c>'''timeline</c> 围栏体按标记行切成条目切片。
 /// 原实现写在 <c>MarkdigToNodeConverter.ScanTimelineItems</c>（转换器私有方法），
 /// 现搬到 parser 侧：由 <c>TimelineBlock</c> 在首次读取时调用本类完成，
 /// 转换器只消费切片、不再持有任何行扫描逻辑。

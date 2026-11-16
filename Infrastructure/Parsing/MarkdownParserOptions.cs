@@ -13,7 +13,7 @@ public class MarkdownParserOptions
     public bool EnableMathematics { get; set; } = true;
 
     /// <summary>
-    /// T3 行内接管：用 <see cref="InlineCodeSpanParser"/> 原位替换 Markdig 的代码段解析器。
+    /// 行内接管：用 <see cref="InlineCodeSpanParser"/> 原位替换 Markdig 的代码段解析器。
     /// 关闭时保留原生解析器，行为与接管前逐字节一致。
     /// </summary>
     public bool EnableInlineCodeTakeover { get; set; } = true;

@@ -124,7 +124,7 @@ public static class PartTokens
     public const string Dot = "dot";
     public const string Axis = "axis";
 
-    // 以下 token 只用于内置类型描述（P0-2 描述通道），暂未进入 PartCatalog；
+    // 以下 token 只用于内置类型描述，暂未进入 PartCatalog；
     // 待描述派生部件目录（缺口 B）落地后统一定义“可寻址与否”。
     public const string Wrapper = "wrapper";
     public const string Header = "header";
