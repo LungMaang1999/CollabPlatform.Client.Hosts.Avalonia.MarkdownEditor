@@ -1,7 +1,9 @@
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Diagnostics;
 using System.Globalization;
+using System.Net;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax.Factories;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.SyntaxTakeover;
 using System.Text;
 using Markdig.Extensions.Footnotes;
 using Markdig.Extensions.Mathematics;
@@ -18,17 +20,31 @@ public sealed class MarkdigToNodeConverter
     private static readonly char[] InfoStringSeparators = { ' ', '\t' };
 
     private readonly NodeFactory _nodeFactory;
-    private readonly Markdig.MarkdownPipeline? _pipeline;
+    private readonly UserBlockRegistry? _userBlocks;
+    private readonly FenceKeywordRegistry _fenceKeywords;
+    private readonly InlineHtmlPolicy? _inlineHtml;
+    private readonly InlineHtmlPolicy? _blockHtml;
 
     public MarkdigToNodeConverter(
         NodeFactory? nodeFactory = null,
-        Markdig.MarkdownPipeline? pipeline = null)
+        UserBlockRegistry? userBlocks = null,
+        FenceKeywordRegistry? fenceKeywords = null,
+        InlineHtmlDefinition? inlineHtml = null,
+        InlineHtmlDefinition? blockHtml = null)
     {
         _nodeFactory = nodeFactory ?? new NodeFactory();
-        _pipeline = pipeline;
+        _userBlocks = userBlocks;
+        _fenceKeywords = fenceKeywords ?? FenceKeywordRegistry.BuiltIn;
+        _inlineHtml = inlineHtml is null || inlineHtml.IsEmpty
+            ? null
+            : new InlineHtmlPolicy(inlineHtml);
+
+        // 块级不按 IsEmpty 关通道：空词表 = “一条标签都不放行”，标签就地展开、文字保留；
+        // 若这里回落 null，模板是 content="children" 就会连文字一起丢。
+        _blockHtml = blockHtml is null ? null : new InlineHtmlPolicy(blockHtml);
     }
 
-    public List<MarkdownNode> ConvertBlocks(
+    internal List<MarkdownNode> ConvertBlocks(
         ContainerBlock rootContainer,
         ICollection<DiagnosticMessage> diagnostics,
         string source)
@@ -37,52 +53,20 @@ public sealed class MarkdigToNodeConverter
         ArgumentNullException.ThrowIfNull(diagnostics);
         ArgumentNullException.ThrowIfNull(source);
 
-        var resultNodes = ConvertChildren(rootContainer, diagnostics, source);
+        if (!ParsedDocumentPipeline.IsEnriched(rootContainer))
+        {
+            throw new InvalidOperationException(
+                "Markdig 文档未经 ParsedDocumentPipeline 的解析侧标记，禁止直接转换；请改走 ParsedDocumentPipeline.ParseAndConvert。");
+        }
 
-        // 先填充 RawMarkdown（未闭合 \[ 公式的判定要用），再标记流式半截块。
-        var unclosedFenceStartLine = FenceStateScanner.FindTrailingUnclosedFenceStartLine(source);
+        var resultNodes = ConvertChildren(rootContainer, diagnostics, source);
 
         foreach (var node in resultNodes)
         {
             PopulateRawMarkdown(node, source);
-            MarkUnclosedStreamingBlocks(node, unclosedFenceStartLine);
         }
 
         return resultNodes;
-    }
-
-    private static void MarkUnclosedStreamingBlocks(MarkdownNode node, int? unclosedFenceStartLine)
-    {
-        if (unclosedFenceStartLine.HasValue
-            && node.Range.StartLine == unclosedFenceStartLine.Value
-            && node.Type is NodeType.CodeBlock or NodeType.MathBlock or NodeType.Mermaid
-                or NodeType.ImageMatrix or NodeType.QrCode or NodeType.PoemBlock
-                or NodeType.Timeline or NodeType.Radar)
-        {
-            // 文档末尾未闭合围栏对应的代码/math 围栏/mermaid 块。
-            node.Attributes[MarkdownAttributes.Unclosed] = "true";
-        }
-        else if (node.Type == NodeType.MathBlock && IsUnclosedLatexBlock(node.RawMarkdown))
-        {
-            // \[ 块公式未在源码中出现 \] 闭合（块解析会吞到 EOF）。
-            node.Attributes[MarkdownAttributes.Unclosed] = "true";
-        }
-
-        foreach (var child in node.Children)
-        {
-            MarkUnclosedStreamingBlocks(child, unclosedFenceStartLine);
-        }
-    }
-
-    private static bool IsUnclosedLatexBlock(string rawMarkdown)
-    {
-        var trimmed = rawMarkdown.AsSpan().TrimStart();
-        if (trimmed.Length < 2 || trimmed[0] != '\\' || trimmed[1] != '[')
-        {
-            return false;
-        }
-
-        return rawMarkdown.IndexOf("\\]", StringComparison.Ordinal) < 0;
     }
 
     private List<MarkdownNode> ConvertChildren(
@@ -99,6 +83,11 @@ public sealed class MarkdigToNodeConverter
                 var node = ConvertBlock(block, diagnostics, source);
                 if (node is not null)
                 {
+                    if (UnclosedBlockMarker.IsUnclosed(block))
+                    {
+                        node.SetDerivedAttribute(MarkdownAttributes.Unclosed, "true");
+                    }
+
                     resultNodes.Add(node);
                 }
             }
@@ -109,7 +98,7 @@ public sealed class MarkdigToNodeConverter
                     Severity = DiagnosticSeverity.Warning,
                     Code = "BLOCK_CONVERSION_FAILED",
                     Message = $"Failed to convert block {block.GetType().FullName}: {ex.Message}",
-                    Range = ExtractSourceRange(block)
+                    Range = BlockRangeProjector.Get(block)
                 });
             }
         }
@@ -122,7 +111,7 @@ public sealed class MarkdigToNodeConverter
         ICollection<DiagnosticMessage> diagnostics,
         string source)
     {
-        var range = ExtractSourceRange(block);
+        var range = BlockRangeProjector.Get(block);
 
         switch (block)
         {
@@ -160,11 +149,11 @@ public sealed class MarkdigToNodeConverter
                     var itemNode = _nodeFactory.Create(
                         isTaskItem ? NodeType.TaskListItem : NodeType.ListItem,
                         NodeCategory.Container,
-                        range: ExtractSourceRange(listItem));
+                        range: BlockRangeProjector.Get(listItem));
 
                     if (isTaskItem)
                     {
-                        itemNode.Attributes["checked"] = isChecked ? "true" : "false";
+                        itemNode.SetDerivedAttribute("checked", isChecked ? "true" : "false");
                     }
 
                     var itemChildren = ConvertChildren(listItem, diagnostics, source);
@@ -180,22 +169,27 @@ public sealed class MarkdigToNodeConverter
                 return listNode;
 
             case QuoteBlock quoteBlock:
-                var quoteNode = _nodeFactory.Create(NodeType.Quote, NodeCategory.Container, range: range);
-                var quoteChildren = ConvertChildren(quoteBlock, diagnostics, source);
-                foreach (var child in quoteChildren)
                 {
-                    quoteNode.AddChild(child);
-                }
+                    var quoteChildren = ConvertChildren(quoteBlock, diagnostics, source);
 
-                if (TryClassifyCustomBlock(quoteNode))
-                {
-                    quoteNode.Text = GetInlineText(quoteNode);
+                    // 类型在节点创建前定下，此后不再改 Type/Category。
+                    var classification = QuoteLabelClassifier.Classify(ReadFirstLineText(quoteChildren));
+                    var quoteType = classification.Kind == QuoteLabelKind.CustomBlock
+                        ? NodeType.Custom
+                        : NodeType.Quote;
+                    var quoteCategory = classification.Kind == QuoteLabelKind.CustomBlock
+                        ? NodeCategory.Block
+                        : NodeCategory.Container;
+
+                    var quoteNode = _nodeFactory.Create(quoteType, quoteCategory, range: range);
+                    foreach (var child in quoteChildren)
+                    {
+                        quoteNode.AddChild(child);
+                    }
+
+                    ApplyQuoteLabel(quoteNode, quoteChildren, classification);
+                    return quoteNode;
                 }
-                else
-                {
-                    TryClassifyAdmonition(quoteNode);
-                }
-                return quoteNode;
 
             case Table tableBlock:
                 var tableNode = _nodeFactory.Create(
@@ -213,7 +207,7 @@ public sealed class MarkdigToNodeConverter
                     var rowNode = _nodeFactory.Create(
                         NodeType.TableRow,
                         NodeCategory.Container,
-                        range: ExtractSourceRange(rowBlock));
+                        range: BlockRangeProjector.Get(rowBlock));
 
                     foreach (var cellObj in rowBlock)
                     {
@@ -225,7 +219,7 @@ public sealed class MarkdigToNodeConverter
                         var cellNode = _nodeFactory.Create(
                             NodeType.TableCell,
                             NodeCategory.Container,
-                            range: ExtractSourceRange(cellBlock));
+                            range: BlockRangeProjector.Get(cellBlock));
 
                         cellNode.IsTableHeader = rowBlock.IsHeader;
 
@@ -261,16 +255,16 @@ public sealed class MarkdigToNodeConverter
                         var footnoteNode = _nodeFactory.Create(
                             NodeType.Footnote,
                             NodeCategory.Container,
-                            range: ExtractSourceRange(footnoteBlock));
+                            range: BlockRangeProjector.Get(footnoteBlock));
 
                         // 保留用户原始标签作为显示文本（数字 42、字母 alpha 等），
                         // 锚点用确定性 slug；多处引用时 backrefs 记录每个引用的锚点。
                         var label = ExtractFootnoteLabel(footnoteBlock.Label);
                         var slug = BuildFootnoteSlug(label, footnoteBlock.Order);
 
-                        footnoteNode.Attributes["label"] = label;
-                        footnoteNode.Attributes["slug"] = slug;
-                        footnoteNode.Attributes["id"] = "fn-" + slug;
+                        footnoteNode.SetDerivedAttribute("label", label);
+                        footnoteNode.SetDerivedAttribute("slug", slug);
+                        footnoteNode.SetDerivedAttribute("id", "fn-" + slug);
 
                         var backrefAnchors = new StringBuilder();
                         for (var linkIndex = 0; linkIndex < footnoteBlock.Links.Count; linkIndex++)
@@ -283,7 +277,7 @@ public sealed class MarkdigToNodeConverter
                             backrefAnchors.Append(BuildFootnoteRefAnchor(slug, linkIndex));
                         }
 
-                        footnoteNode.Attributes["backrefs"] = backrefAnchors.ToString();
+                        footnoteNode.SetDerivedAttribute("backrefs", backrefAnchors.ToString());
 
                         var children = ConvertChildren(footnoteBlock, diagnostics, source);
                         foreach (var child in children)
@@ -296,6 +290,9 @@ public sealed class MarkdigToNodeConverter
 
                     return groupNode;
                 }
+
+            case UserBlock userBlock:
+                return BuildUserBlock(userBlock, diagnostics, source);
 
             case MathBlock mathBlock:
                 return _nodeFactory.Create(
@@ -318,14 +315,14 @@ public sealed class MarkdigToNodeConverter
                         NodeCategory.Block,
                         text: poemBlock.Lines.ToString().TrimEnd('\r', '\n'),
                         range: range);
-                    poemNode.Attributes["poem-type"] = poemBlock.PoemType.ToString();
-                    poemNode.Attributes["poem-alias"] = poemBlock.Alias;
-                    BuildPoemParts(poemNode);
+                    poemNode.SetDerivedAttribute("poem-type", poemBlock.PoemType.ToString());
+                    poemNode.SetDerivedAttribute("poem-alias", poemBlock.Alias);
+                    ApplyPoemLayout(poemNode, poemBlock.Layout);
                     return poemNode;
                 }
 
             case TimelineBlock timelineBlock:
-                return BuildTimeline(timelineBlock, range, diagnostics, source);
+                return BuildTimeline(timelineBlock, range, diagnostics);
 
             case RadarBlock radarBlock:
                 return BuildRadar(radarBlock, range);
@@ -339,8 +336,9 @@ public sealed class MarkdigToNodeConverter
                         .Split(InfoStringSeparators, StringSplitOptions.RemoveEmptyEntries)
                         .FirstOrDefault();
 
-                    if (string.Equals(infoToken, "math", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(infoToken, "latex", StringComparison.OrdinalIgnoreCase))
+                    var fenceEntry = _fenceKeywords.ResolveExact(FenceFamily.CodeFence, infoToken);
+
+                    if (fenceEntry?.Target is FenceTarget.Math)
                     {
                         return _nodeFactory.Create(
                             NodeType.MathBlock,
@@ -349,7 +347,7 @@ public sealed class MarkdigToNodeConverter
                             range: range);
                     }
 
-                    if (string.Equals(infoToken, "mermaid", StringComparison.OrdinalIgnoreCase))
+                    if (fenceEntry?.Target is FenceTarget.Mermaid)
                     {
                         return _nodeFactory.Create(
                             NodeType.Mermaid,
@@ -358,8 +356,7 @@ public sealed class MarkdigToNodeConverter
                             range: range);
                     }
 
-                    if (string.Equals(infoToken, "image", StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(infoToken, "img", StringComparison.OrdinalIgnoreCase))
+                    if (fenceEntry?.Target is FenceTarget.ImageMatrix)
                     {
                         return _nodeFactory.Create(
                             NodeType.ImageMatrix,
@@ -368,8 +365,7 @@ public sealed class MarkdigToNodeConverter
                             range: range);
                     }
 
-                    if (string.Equals(infoToken, "qrcode", StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(infoToken, "qr", StringComparison.OrdinalIgnoreCase))
+                    if (fenceEntry?.Target is FenceTarget.QrCode)
                     {
                         var qrNode = _nodeFactory.Create(
                             NodeType.QrCode,
@@ -378,12 +374,12 @@ public sealed class MarkdigToNodeConverter
                             range: range);
 
                         // Markdig 把围栏 info 拆为 Info（首词）与 Arguments（其余部分），
-                        // 选项在 Arguments 中，两者合并后解析。
-                        var fullInfo = string.IsNullOrWhiteSpace(codeBlock.Arguments)
-                            ? codeBlock.Info
-                            : codeBlock.Info + " " + codeBlock.Arguments;
+                        // 选项解析器负责合并；产物按源码顺序落属性，顺序影响渲染字节。
+                        foreach (var option in QrInfoOptionsParser.Parse(codeBlock.Info, codeBlock.Arguments))
+                        {
+                            qrNode.SetDerivedAttribute(option.Key, option.Value);
+                        }
 
-                        ParseQrInfoOptions(fullInfo, qrNode);
                         return qrNode;
                     }
 
@@ -395,7 +391,7 @@ public sealed class MarkdigToNodeConverter
 
                     if (!string.IsNullOrWhiteSpace(infoToken))
                     {
-                        codeNode.Attributes["language"] = infoToken;
+                        codeNode.SetDerivedAttribute("language", infoToken);
                     }
 
                     return codeNode;
@@ -415,12 +411,15 @@ public sealed class MarkdigToNodeConverter
             case HtmlBlock htmlBlock:
                 {
                     var htmlText = htmlBlock.Lines.ToString();
-
-                    return _nodeFactory.Create(
+                    var node = _nodeFactory.Create(
                         NodeType.HtmlBlock,
                         NodeCategory.Block,
                         text: htmlText,
                         range: range);
+
+                    PopulateHtmlBlock(node, htmlText, range, diagnostics);
+
+                    return node;
                 }
 
             case ThematicBreakBlock:
@@ -443,53 +442,72 @@ public sealed class MarkdigToNodeConverter
     }
 
     /// <summary>
-    /// 解析二维码围栏 info string 可选项（<c>```qrcode ecc=H border=4</c>）：
-    /// ecc（别名 level）仅 L/M/Q/H；border（别名 quiet/margin）仅 0–10。非法值忽略。
+    /// 用户块落到 <see cref="NodeType.Custom"/>：custom-kind 取定义 Id，
+    /// 行内 key=value 原样落属性，EOF 未闭合额外落 unclosed。
+    /// 定义声明的属性约束（默认值/取值/必填/未知键）与内容模型在此生效。
     /// </summary>
-    private static void ParseQrInfoOptions(string? info, MarkdownNode qrNode)
+    private MarkdownNode BuildUserBlock(
+        UserBlock userBlock,
+        ICollection<DiagnosticMessage> diagnostics,
+        string source)
     {
-        if (string.IsNullOrWhiteSpace(info))
-            return;
+        var node = _nodeFactory.Create(
+            NodeType.Custom,
+            NodeCategory.Container,
+            range: userBlock.Range);
 
-        var tokens = info.Trim()
-            .Split(InfoStringSeparators, StringSplitOptions.RemoveEmptyEntries);
+        node.Text = userBlock.Header;
 
-        // tokens[0] 是关键字本身（qrcode/qr），从其后解析
-        for (var i = 1; i < tokens.Length; i++)
+        var headerLine = Math.Max(1, userBlock.Line + 1);
+        var headerColumn = Math.Max(1, userBlock.Column + 1);
+        var headerRange = new SourceRange
         {
-            var token = tokens[i];
-            var eqIndex = token.IndexOf('=');
-            if (eqIndex <= 0 || eqIndex >= token.Length - 1)
+            StartOffset = Math.Max(0, userBlock.Span.Start),
+            Length = userBlock.Header.Length,
+            StartLine = headerLine,
+            StartColumn = headerColumn,
+            EndLine = headerLine,
+            EndColumn = headerColumn + userBlock.Header.Length
+        };
+
+        var sourceAttributes = new List<KeyValuePair<string, string>>(userBlock.Attributes.Count);
+        foreach (var attribute in userBlock.Attributes)
+        {
+            // 派生键由解析结果决定，不接受源码覆盖。
+            if (attribute.Key is "custom-kind" or MarkdownAttributes.Unclosed)
+            {
                 continue;
-
-            var key = token[..eqIndex];
-            var val = token[(eqIndex + 1)..];
-
-            if (key.Equals("ecc", StringComparison.OrdinalIgnoreCase)
-                || key.Equals("level", StringComparison.OrdinalIgnoreCase))
-            {
-                if (val is "L" or "M" or "Q" or "H")
-                    qrNode.Attributes["qr-ecc"] = val.ToUpperInvariant();
             }
-            else if (key.Equals("border", StringComparison.OrdinalIgnoreCase)
-                || key.Equals("quiet", StringComparison.OrdinalIgnoreCase)
-                || key.Equals("margin", StringComparison.OrdinalIgnoreCase))
-            {
-                if (int.TryParse(val, out var modules) && modules is >= 0 and <= 10)
-                    qrNode.Attributes["qr-border"] = modules.ToString();
-            }
+            // 来源标记 Source：这是源码内联值，重解析后优先级最高。
+            node.SetSourceAttribute(attribute.Key, attribute.Value);
+            sourceAttributes.Add(attribute);
         }
+
+        UserBlockConstraintValidator.ApplyAttributes(
+            userBlock.Definition,
+            sourceAttributes,
+            node,
+            diagnostics,
+            headerRange);
+
+        node.SetDerivedAttribute("custom-kind", userBlock.Definition.Id);
+
+        if (!userBlock.Closed)
+        {
+            node.SetDerivedAttribute(MarkdownAttributes.Unclosed, "true");
+        }
+
+        foreach (var child in ConvertChildren(userBlock, diagnostics, source))
+        {
+            node.AddChild(child);
+        }
+
+        UserBlockConstraintValidator.ValidateContent(userBlock.Definition, node, diagnostics);
+
+        return node;
     }
 
     // ── 时间线围栏展开 ────────────────────────────────────────────────
-
-    private sealed record TimelineItemScan(
-        TimelineMarkerInfo Info,
-        SourceRange Range,
-        string RawMarkdown,
-        int BodyStart,
-        int BodyLength,
-        int BodyStartLine);
 
     /// <summary>
     /// 把雷达图围栏转为 Radar 容器节点：表格原文存于 node.Text，开围栏选项落属性，
@@ -503,30 +521,30 @@ public sealed class MarkdigToNodeConverter
             text: radarBlock.Lines.ToString().TrimEnd('\r', '\n'),
             range: range);
 
-        var info = RadarMarker.ParseFenceInfo(radarBlock.Info);
+        var info = radarBlock.Options;
         if (info.Title.Length > 0)
         {
-            radar.Attributes["radar-title"] = info.Title;
+            radar.SetDerivedAttribute("radar-title", info.Title);
         }
         if (info.ShowLabels)
         {
-            radar.Attributes["radar-labels"] = "show";
+            radar.SetDerivedAttribute("radar-labels", "show");
         }
         if (info.MaxScale is double maxScale)
         {
-            radar.Attributes["radar-scale"] = "max:" + maxScale.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            radar.SetDerivedAttribute("radar-scale", "max:" + maxScale.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
         if (!info.ShowLegend)
         {
-            radar.Attributes["radar-legend"] = "hide";
+            radar.SetDerivedAttribute("radar-legend", "hide");
         }
         if (info.FillOpacity != RadarMarker.DefaultFillOpacity)
         {
-            radar.Attributes["radar-fill"] = info.FillOpacity.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            radar.SetDerivedAttribute("radar-fill", info.FillOpacity.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
         if (!string.Equals(info.Size, RadarMarker.SizeMedium, StringComparison.Ordinal))
         {
-            radar.Attributes["radar-size"] = info.Size;
+            radar.SetDerivedAttribute("radar-size", info.Size);
         }
 
         return radar;
@@ -539,8 +557,7 @@ public sealed class MarkdigToNodeConverter
     private MarkdownNode BuildTimeline(
         TimelineBlock timelineBlock,
         SourceRange range,
-        ICollection<DiagnosticMessage> diagnostics,
-        string source)
+        ICollection<DiagnosticMessage> diagnostics)
     {
         var timeline = _nodeFactory.Create(
             NodeType.Timeline,
@@ -548,19 +565,20 @@ public sealed class MarkdigToNodeConverter
             text: timelineBlock.Lines.ToString().TrimEnd('\r', '\n'),
             range: range);
 
-        var records = ScanTimelineItems(source, timelineBlock, range);
+        // 条目切分由 parser 侧完成（TimelineBlock.Items），转换器只消费切片。
+        var records = timelineBlock.Items.ToList();
 
         // 默认即中轴双列：侧别缺省的节点按序左右交替，与属性面板“自动”一致。
-        timeline.Attributes["timeline-layout"] = "axis";
+        timeline.SetDerivedAttribute("timeline-layout", "axis");
 
         // 开围栏选项：line=solid|dashed、gap=2..24（仅虚线时落属性）、sort=asc|desc
         var fenceInfo = TimelineMarker.ParseFenceInfo(timelineBlock.Info);
         if (fenceInfo.LineStyle == TimelineMarker.LineDashed)
         {
-            timeline.Attributes["timeline-line"] = TimelineMarker.LineDashed;
+            timeline.SetDerivedAttribute("timeline-line", TimelineMarker.LineDashed);
             if (fenceInfo.Gap is int gap)
             {
-                timeline.Attributes["timeline-gap"] = gap.ToString();
+                timeline.SetDerivedAttribute("timeline-gap", gap.ToString());
             }
         }
 
@@ -570,12 +588,12 @@ public sealed class MarkdigToNodeConverter
         var sortAsc = string.Equals(fenceInfo.Sort, TimelineMarker.SortAsc, StringComparison.OrdinalIgnoreCase);
         if (sortDesc)
         {
-            timeline.Attributes["timeline-sort"] = TimelineMarker.SortDesc;
+            timeline.SetDerivedAttribute("timeline-sort", TimelineMarker.SortDesc);
             records = SortTimelineRecords(records, sortDesc: true);
         }
         else if (sortAsc)
         {
-            timeline.Attributes["timeline-sort"] = TimelineMarker.SortAsc;
+            timeline.SetDerivedAttribute("timeline-sort", TimelineMarker.SortAsc);
             records = SortTimelineRecords(records, sortDesc: false);
         }
 
@@ -591,26 +609,31 @@ public sealed class MarkdigToNodeConverter
                 range: record.Range);
             item.IsSynthetic = true;
             item.RawMarkdown = record.RawMarkdown;
-            item.Attributes["timeline-time"] = record.Info.Time;
+            item.SetDerivedAttribute("timeline-time", record.Info.Time);
             if (record.Info.Tags.Count > 0)
             {
-                item.Attributes["timeline-tags"] = TimelineMarker.JoinTags(record.Info.Tags);
+                item.SetDerivedAttribute("timeline-tags", TimelineMarker.JoinTags(record.Info.Tags));
             }
             if (record.Info.Side is not null)
             {
-                item.Attributes["timeline-side"] = record.Info.Side;
+                item.SetDerivedAttribute("timeline-side", record.Info.Side);
             }
-            item.Attributes["timeline-side-effective"] = effectiveSide;
+            item.SetDerivedAttribute("timeline-side-effective", effectiveSide);
 
             if (record.BodyLength > 0)
             {
-                var bodyText = source.Substring(record.BodyStart, record.BodyLength);
-                var bodyDocument = _pipeline is null
-                    ? Markdig.Markdown.Parse(bodyText)
-                    : Markdig.Markdown.Parse(bodyText, _pipeline);
+                // 正文切片与再解析是解析侧产物（TimelineBodyResolver），这里只消费。
+                var body = timelineBlock.GetBody(record)
+                    ?? throw new InvalidOperationException("时间线条目正文未在解析侧展开。");
+                if (body.Error is not null)
+                {
+                    // 保持旧顺序：正文解析失败时所属时间线块整体失败。
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(body.Error).Throw();
+                }
+
+                var bodyNodes = ConvertBlocks(body.Document!, diagnostics, body.Text!);
 
                 // 正文子树坐标相对节点正文切片，统一平移到全文。
-                var bodyNodes = ConvertBlocks(bodyDocument, diagnostics, bodyText);
                 var bodyLineDelta = record.BodyStartLine - 1;
                 foreach (var bodyNode in bodyNodes)
                 {
@@ -626,120 +649,10 @@ public sealed class MarkdigToNodeConverter
     }
 
     /// <summary>
-    /// 逐行扫描围栏体，定位每个 @@ 节点在全文源码中的区间以及正文切片坐标。
-    /// 未闭合围栏扫描到 EOF；首个 @@ 之前的杂散文本不产生节点。
-    /// 行级语法限制：正文代码块内若出现行首 "@@ " 也会被当作节点边界。
-    /// </summary>
-    private static List<TimelineItemScan> ScanTimelineItems(
-        string source,
-        TimelineBlock block,
-        SourceRange range)
-    {
-        var records = new List<TimelineItemScan>();
-
-        var pos = MoveToNextLine(source, range.StartOffset);
-        var lineIndex = block.Line + 1;
-
-        var markerStart = -1;
-        var markerLine = -1;
-        TimelineMarkerInfo? markerInfo = null;
-
-        void Finish(int itemEnd, int lastBodyLineIndex)
-        {
-            if (markerInfo is null || markerStart < 0)
-            {
-                return;
-            }
-
-            var rawEnd = itemEnd;
-            while (rawEnd > markerStart
-                && (source[rawEnd - 1] == '\n' || source[rawEnd - 1] == '\r'))
-            {
-                rawEnd--;
-            }
-
-            var rawMarkdown = source.Substring(markerStart, rawEnd - markerStart);
-
-            var bodyStart = 0;
-            var bodyLength = 0;
-            var bodyStartLine = markerLine + 2; // 1-based：标记行下一行为正文首行
-            var markerNewline = source.IndexOf('\n', markerStart);
-            if (markerNewline >= 0 && markerNewline + 1 < itemEnd)
-            {
-                bodyStart = markerNewline + 1;
-                bodyLength = itemEnd - bodyStart;
-                while (bodyLength > 0
-                    && (source[bodyStart + bodyLength - 1] == '\n'
-                        || source[bodyStart + bodyLength - 1] == '\r'))
-                {
-                    bodyLength--;
-                }
-            }
-
-            var column = 1;
-            for (var probe = markerStart; probe < rawEnd && source[probe] == ' '; probe++)
-            {
-                column++;
-            }
-
-            var itemRange = new SourceRange
-            {
-                StartOffset = markerStart,
-                Length = itemEnd - markerStart,
-                StartLine = markerLine + 1,
-                StartColumn = column,
-                EndLine = lastBodyLineIndex + 1,
-                EndColumn = 1
-            };
-
-            records.Add(new TimelineItemScan(
-                markerInfo, itemRange, rawMarkdown,
-                bodyStart, bodyLength, bodyStartLine));
-        }
-
-        while (pos <= source.Length)
-        {
-            var newlineIndex = source.IndexOf('\n', pos);
-            var lineEnd = newlineIndex < 0 ? source.Length : newlineIndex;
-            var contentEnd = lineEnd > pos && source[lineEnd - 1] == '\r' ? lineEnd - 1 : lineEnd;
-            var lineText = source.Substring(pos, contentEnd - pos);
-
-            var isClosing = block.ClosingFenceLineIndex.HasValue
-                && lineIndex == block.ClosingFenceLineIndex.Value;
-
-            if (isClosing)
-            {
-                Finish(pos, lineIndex - 1);
-                break;
-            }
-
-            if (TimelineMarker.IsMarkerLine(lineText))
-            {
-                // 上一节点正文止于本节点行首。
-                Finish(pos, lineIndex - 1);
-                markerStart = pos;
-                markerLine = lineIndex;
-                markerInfo = TimelineMarker.TryParse(lineText);
-            }
-
-            if (newlineIndex < 0)
-            {
-                Finish(source.Length, lineIndex);
-                break;
-            }
-
-            pos = newlineIndex + 1;
-            lineIndex++;
-        }
-
-        return records;
-    }
-
-    /// <summary>
     /// 按时间节点排序：desc 时按日期从晚到早，否则从早到晚。
     /// 时间无法解析为日期的节点统一排到末尾，保持源码相对顺序（LINQ OrderBy 稳定排序）。
     /// </summary>
-    private static List<TimelineItemScan> SortTimelineRecords(List<TimelineItemScan> records, bool sortDesc)
+    private static List<TimelineItemSlice> SortTimelineRecords(List<TimelineItemSlice> records, bool sortDesc)
     {
         if (records.Count <= 1)
         {
@@ -770,13 +683,6 @@ public sealed class MarkdigToNodeConverter
             out var date)
             ? date
             : null;
-    }
-
-    // 返回 fromOffset 所在行的下一行行首偏移。
-    private static int MoveToNextLine(string source, int fromOffset)
-    {
-        var newlineIndex = source.IndexOf('\n', fromOffset);
-        return newlineIndex < 0 ? source.Length : newlineIndex + 1;
     }
 
     // 时间线节点正文子树在正文切片内是局部坐标，统一平移为全文坐标。
@@ -813,14 +719,36 @@ public sealed class MarkdigToNodeConverter
             return;
         }
 
+        // 行内 HTML 的标签栈：放行的标签开一个 HtmlInline 容器节点，后续行内内容挂到容器里；
+        // 栈在块（更准确地说是本次容器遍历）结束时自动闭合，不允许跨块闭合。
+        var activeParent = parentNode;
+        var openTags = new List<OpenInlineHtmlTag>();
+        var stripTags = new List<string>();
+        var depthReported = false;
+
         foreach (var inline in container)
         {
-            var range = ExtractSourceRange(inline);
+            var range = BlockRangeProjector.Get(inline);
+
+            // strip 期间整段内容（含嵌套标签与文字）都不产生节点，只数同名标签的层数。
+            if (stripTags.Count > 0)
+            {
+                if (inline is HtmlInline stripped
+                    && InlineHtmlTagParser.TryParse(
+                        stripped.Tag,
+                        _inlineHtml?.MaxTagNameLength ?? InlineHtmlDefinition.DefaultMaxTagNameLength,
+                        out var strippedToken))
+                {
+                    ConsumeStripToken(strippedToken, stripTags);
+                }
+
+                continue;
+            }
 
             switch (inline)
             {
                 case LiteralInline literal:
-                    parentNode.AddChild(
+                    activeParent.AddChild(
                         _nodeFactory.Create(
                             NodeType.Text,
                             NodeCategory.Inline,
@@ -854,12 +782,12 @@ public sealed class MarkdigToNodeConverter
                             range: range);
 
                         ProcessInlines(emphasis, inlineNode, diagnostics);
-                        parentNode.AddChild(inlineNode);
+                        activeParent.AddChild(inlineNode);
                         break;
                     }
 
                 case CodeInline code:
-                    parentNode.AddChild(
+                    activeParent.AddChild(
                         _nodeFactory.Create(
                             NodeType.InlineCode,
                             NodeCategory.Inline,
@@ -868,7 +796,7 @@ public sealed class MarkdigToNodeConverter
                     break;
 
                 case MathInline mathInline:
-                    parentNode.AddChild(
+                    activeParent.AddChild(
                         _nodeFactory.Create(
                             NodeType.MathInline,
                             NodeCategory.Inline,
@@ -880,7 +808,7 @@ public sealed class MarkdigToNodeConverter
                     AddAutoLinkNode(
                         autoLink.Url ?? string.Empty,
                         range,
-                        parentNode);
+                        activeParent);
                     break;
 
                 case LinkInline link:
@@ -892,7 +820,7 @@ public sealed class MarkdigToNodeConverter
                             AddAutoLinkNode(
                                 url,
                                 range,
-                                parentNode);
+                                activeParent);
                             break;
                         }
 
@@ -907,8 +835,8 @@ public sealed class MarkdigToNodeConverter
 
                         if (link.IsImage)
                         {
-                            linkNode.Attributes["src"] = url;
-                            linkNode.Attributes["url"] = url;
+                            linkNode.SetDerivedAttribute("src", url);
+                            linkNode.SetDerivedAttribute("url", url);
 
                             ProcessInlines(
                                 link,
@@ -917,8 +845,8 @@ public sealed class MarkdigToNodeConverter
                         }
                         else
                         {
-                            linkNode.Attributes["href"] = url;
-                            linkNode.Attributes["url"] = url;
+                            linkNode.SetDerivedAttribute("href", url);
+                            linkNode.SetDerivedAttribute("url", url);
 
                             ProcessInlines(
                                 link,
@@ -933,12 +861,12 @@ public sealed class MarkdigToNodeConverter
                             }
                         }
 
-                        parentNode.AddChild(linkNode);
+                        activeParent.AddChild(linkNode);
                         break;
                     }
 
                 case LineBreakInline:
-                    parentNode.AddChild(
+                    activeParent.AddChild(
                         _nodeFactory.Create(
                             NodeType.LineBreak,
                             NodeCategory.Inline,
@@ -973,20 +901,35 @@ public sealed class MarkdigToNodeConverter
 
                         var anchor = BuildFootnoteRefAnchor(slug, occurrence);
 
-                        linkNode.Attributes["id"] = anchor;
-                        linkNode.Attributes["href"] = "#fn-" + slug;
-                        linkNode.Attributes["anchor"] = anchor;
-                        linkNode.Attributes["slug"] = slug;
+                        linkNode.SetDerivedAttribute("id", anchor);
+                        linkNode.SetDerivedAttribute("href", "#fn-" + slug);
+                        linkNode.SetDerivedAttribute("anchor", anchor);
+                        linkNode.SetDerivedAttribute("slug", slug);
                         linkNode.Text = label;
 
-                        parentNode.AddChild(linkNode);
+                        activeParent.AddChild(linkNode);
                         break;
                     }
+
+                case HtmlInline htmlInline:
+                    HandleInlineHtml(
+                        htmlInline.Tag,
+                        parentNode,
+                        ref activeParent,
+                        openTags,
+                        stripTags,
+                        diagnostics,
+                        range,
+                        ref depthReported,
+                        _inlineHtml,
+                        InlineScope,
+                        InlineSectionName);
+                    break;
 
                 default:
                     if (inline is ContainerInline childContainer)
                     {
-                        ProcessInlines(childContainer, parentNode, diagnostics);
+                        ProcessInlines(childContainer, activeParent, diagnostics);
                     }
                     else
                     {
@@ -1001,49 +944,520 @@ public sealed class MarkdigToNodeConverter
                     break;
             }
         }
+
+        CloseUnclosedInlineHtml(openTags, diagnostics, InlineScope);
     }
 
-    private static readonly System.Text.RegularExpressions.Regex CustomBlockLabelRegex =
-        new(
-            @"^(?<kind>[A-Za-z][A-Za-z0-9_-]{0,20})[ \t]*:[ \t]*(?<body>.*)$",
-            System.Text.RegularExpressions.RegexOptions.Compiled);
+    /// <summary>行内 HTML 放行标签的栈条目：标签名与它对应的容器节点。</summary>
+    private sealed record OpenInlineHtmlTag(string Name, MarkdownNode Node);
 
-    private static bool TryClassifyCustomBlock(MarkdownNode quoteNode)
+    internal const string InlineScope = "行内";
+    internal const string BlockScope = "块级";
+    internal const string InlineSectionName = "inline-html";
+    internal const string BlockSectionName = "block-html";
+
+    /// <summary>
+    /// 行内/块级 HTML 标签的统一入口：白名单未声明时保持翻案前行为（丢弃标签、保留文字、
+    /// 一条 <c>UNSUPPORTED_INLINE_TYPE</c> 警告）；声明后按声明与机制地板的交集处置。
+    /// <paramref name="scope"/> 只影响诊断文案，判定完全由 <paramref name="policy"/> 决定。
+    /// </summary>
+    private void HandleInlineHtml(
+        string? rawTag,
+        MarkdownNode rootParent,
+        ref MarkdownNode activeParent,
+        List<OpenInlineHtmlTag> openTags,
+        List<string> stripTags,
+        ICollection<DiagnosticMessage> diagnostics,
+        SourceRange range,
+        ref bool depthReported,
+        InlineHtmlPolicy? policy,
+        string scope,
+        string sectionName)
     {
-        var firstParagraph = quoteNode.Children
+        if (policy is null)
+        {
+            diagnostics.Add(new DiagnosticMessage
+            {
+                Severity = DiagnosticSeverity.Warning,
+                Code = "UNSUPPORTED_INLINE_TYPE",
+                Message = "Unsupported inline element: HtmlInline",
+                Range = range
+            });
+            return;
+        }
+
+        // 注释、声明、处理指令与无法解析的 token：不是元素标签，按未声明处置且不发射内容。
+        if (!InlineHtmlTagParser.TryParse(rawTag, policy.MaxTagNameLength, out var token))
+        {
+            return;
+        }
+
+        if (token.IsClosing)
+        {
+            for (var index = openTags.Count - 1; index >= 0; index--)
+            {
+                if (!string.Equals(openTags[index].Name, token.Name, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                while (openTags.Count > index)
+                {
+                    CloseOpenInlineHtml(openTags);
+                }
+
+                activeParent = openTags.Count > 0 ? openTags[^1].Node : rootParent;
+                return;
+            }
+
+            return; // 孤立闭合标签：丢弃
+        }
+
+        var tag = policy.FindTag(token.Name);
+        switch (policy.ResolveDisposition(tag, token.Name))
+        {
+            case InlineHtmlDisposition.Strip:
+                if (!token.IsSelfClosing)
+                {
+                    stripTags.Add(token.Name);
+                }
+
+                return;
+
+            case InlineHtmlDisposition.Unwrap:
+                if (tag is null)
+                {
+                    diagnostics.Add(new DiagnosticMessage
+                    {
+                        Severity = DiagnosticSeverity.Warning,
+                        Code = "INLINE_HTML_TAG_UNKNOWN",
+                        Message = $"{scope} HTML 标签 <{token.Name}> 未在 {sectionName} 声明中列出，已丢弃标签、保留内容。",
+                        Range = range
+                    });
+                }
+
+                return;
+        }
+
+        if (openTags.Count >= policy.MaxDepth)
+        {
+            if (!depthReported)
+            {
+                depthReported = true;
+                diagnostics.Add(new DiagnosticMessage
+                {
+                    Severity = DiagnosticSeverity.Warning,
+                    Code = "INLINE_HTML_DEPTH_EXCEEDED",
+                    Message = $"{scope} HTML 嵌套超过上限 {policy.MaxDepth} 层，超出部分已丢弃标签、保留内容。",
+                    Range = range
+                });
+            }
+
+            return;
+        }
+
+        var htmlNode = _nodeFactory.Create(NodeType.HtmlInline, NodeCategory.Inline, range: range);
+        htmlNode.RawMarkdown = rawTag?.Trim() ?? string.Empty;
+        htmlNode.SetDerivedAttribute("html-tag", tag!.Name.ToLowerInvariant());
+
+        ApplyInlineHtmlAttributes(htmlNode, tag, token, diagnostics, range, policy, scope);
+
+        activeParent.AddChild(htmlNode);
+
+        // 空元素与自闭合标签：不压栈、不接子节点。
+        if (tag.IsVoid || token.IsSelfClosing)
+        {
+            htmlNode.SetDerivedAttribute("html-void", "1");
+            return;
+        }
+
+        openTags.Add(new OpenInlineHtmlTag(token.Name, htmlNode));
+        activeParent = htmlNode;
+    }
+
+    /// <summary>按声明与机制地板的交集把属性写到节点上；被拒的属性只留诊断，不发射。</summary>
+    private void ApplyInlineHtmlAttributes(
+        MarkdownNode node,
+        InlineHtmlTagDefinition tag,
+        InlineHtmlTagToken token,
+        ICollection<DiagnosticMessage> diagnostics,
+        SourceRange range,
+        InlineHtmlPolicy? policy,
+        string scope)
+    {
+        if (policy is null)
+        {
+            return;
+        }
+
+        var kept = 0;
+        var hasAbsoluteHttp = false;
+        foreach (var attribute in token.Attributes)
+        {
+            if (kept >= policy.MaxAttributes)
+            {
+                break; // 超出上限：可预测降级，丢弃剩余属性
+            }
+
+            var name = attribute.Name.ToLowerInvariant();
+            switch (policy.ResolveAttribute(tag, attribute, out var value))
+            {
+                case InlineHtmlAttributeVerdict.Accepted:
+                    node.SetDerivedAttribute(name, value);
+                    kept++;
+
+                    var declaration = tag.FindAttribute(name);
+                    if (declaration is not null
+                        && declaration.IsUrl
+                        && InlineHtmlPolicy.IsAbsoluteHttpUrl(value))
+                    {
+                        hasAbsoluteHttp = true;
+                    }
+
+                    break;
+
+                case InlineHtmlAttributeVerdict.ProtocolRejected:
+                    diagnostics.Add(new DiagnosticMessage
+                    {
+                        Severity = DiagnosticSeverity.Warning,
+                        Code = "INLINE_HTML_PROTOCOL_REJECTED",
+                        Message = $"{scope} HTML 标签 <{tag.Name}> 的属性 {name} 链接协议被拒绝（原值：{TruncateForDiagnostic(attribute.Value)}）。",
+                        Range = range
+                    });
+                    break;
+
+                case InlineHtmlAttributeVerdict.StyleRejected:
+                    diagnostics.Add(new DiagnosticMessage
+                    {
+                        Severity = DiagnosticSeverity.Warning,
+                        Code = "HTML_STYLE_DECLARATION_DROPPED",
+                        Message = $"{scope} HTML 标签 <{tag.Name}> 的 style 没有任何声明落在布局子集内，已丢弃该属性（原值：{TruncateForDiagnostic(attribute.Value)}）。",
+                        Range = range
+                    });
+                    break;
+
+                default:
+                    diagnostics.Add(new DiagnosticMessage
+                    {
+                        Severity = DiagnosticSeverity.Warning,
+                        Code = "INLINE_HTML_ATTRIBUTE_DROPPED",
+                        Message = $"{scope} HTML 标签 <{tag.Name}> 的属性 {name} 未获放行，已丢弃。",
+                        Range = range
+                    });
+                    break;
+            }
+        }
+
+        // 机制层常量：值来自定义、条件是数据声明的 when。
+        // 这里不做字符串拼接，也不给作者留实例入口——常量属性的 ResolveAttribute 永远返回 Dropped。
+        foreach (var declaration in tag.Attributes)
+        {
+            if (!declaration.IsConstant)
+            {
+                continue;
+            }
+
+            // 条件来自数据（when），但 target/rel 这两个机制保留名由机制层强制要求
+            // 绝对 http/https：数据漏写 when 也不能让它们出现在相对/mailto/tel 链接上。
+            var requiresAbsoluteHttp = string.Equals(
+                    declaration.ConstantWhen,
+                    InlineHtmlAttributeDefinition.AbsoluteHttpCondition,
+                    StringComparison.Ordinal)
+                || InlineHtmlRules.IsMechanismConstantAttribute(declaration.Name);
+
+            if (requiresAbsoluteHttp && !hasAbsoluteHttp)
+            {
+                continue;
+            }
+
+            if (node.Attributes.ContainsKey(declaration.Name))
+            {
+                continue;
+            }
+
+            node.SetDerivedAttribute(declaration.Name, declaration.Constant!);
+        }
+    }
+
+    /// <summary>strip 期间只数同名标签的层数：同名开标签入栈、同名闭标签出栈。</summary>
+    private static void ConsumeStripToken(InlineHtmlTagToken token, List<string> stripTags)
+    {
+        if (stripTags.Count == 0
+            || !string.Equals(stripTags[^1], token.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (token.IsClosing)
+        {
+            stripTags.RemoveAt(stripTags.Count - 1);
+        }
+        else if (!token.IsSelfClosing)
+        {
+            stripTags.Add(token.Name);
+        }
+    }
+
+    private static void CloseOpenInlineHtml(List<OpenInlineHtmlTag> openTags)
+    {
+        var last = openTags[^1];
+        openTags.RemoveAt(openTags.Count - 1);
+        last.Node.Text = GetInlineText(last.Node);
+    }
+
+    /// <summary>块结束时仍在栈上的标签自动闭合（不跨块），并逐条留诊断。</summary>
+    private static void CloseUnclosedInlineHtml(
+        List<OpenInlineHtmlTag> openTags,
+        ICollection<DiagnosticMessage> diagnostics,
+        string scope,
+        SourceRange? fallbackRange = null)
+    {
+        for (var index = openTags.Count - 1; index >= 0; index--)
+        {
+            var open = openTags[index];
+            open.Node.Text = GetInlineText(open.Node);
+
+            diagnostics.Add(new DiagnosticMessage
+            {
+                Severity = DiagnosticSeverity.Warning,
+                Code = "INLINE_HTML_UNCLOSED_TAG",
+                Message = $"{scope} HTML 标签 <{open.Name}> 未闭合，已在块结束时自动闭合。",
+                Range = fallbackRange ?? open.Node.Range
+            });
+        }
+
+        openTags.Clear();
+    }
+
+    /// <summary>
+    /// 块级 HTML 的解析期净化：把 <c>HtmlBlock</c> 原文按与行内同一套标签解析器、
+    /// 同一份策略收敛成子树。<b>只认 <c>&lt;block-html&gt;</c> 声明</b>，不与
+    /// <c>&lt;inline-html&gt;</c> 取并集；块内 markdown 不解析（CommonMark 语义）。
+    /// 未声明 <c>&lt;block-html&gt;</c> 时保持翻案前行为：原文留在 <c>Text</c> 上整段转义。
+    /// </summary>
+    private void PopulateHtmlBlock(
+        MarkdownNode node,
+        string htmlText,
+        SourceRange blockRange,
+        ICollection<DiagnosticMessage> diagnostics)
+    {
+        var policy = _blockHtml;
+        if (policy is null || htmlText.Length == 0)
+        {
+            return;
+        }
+
+        var activeParent = node;
+        var openTags = new List<OpenInlineHtmlTag>();
+        var stripTags = new List<string>();
+        var depthReported = false;
+        var text = new StringBuilder();
+
+        var index = 0;
+        while (index < htmlText.Length)
+        {
+            if (htmlText[index] != '<' || !TryReadTagSpan(htmlText, index, out var tagEnd))
+            {
+                if (stripTags.Count == 0)
+                {
+                    text.Append(htmlText[index]);
+                }
+
+                index++;
+                continue;
+            }
+
+            AddBlockHtmlText(activeParent, text);
+
+            var rawTag = htmlText[index..tagEnd];
+            if (!InlineHtmlTagParser.TryParse(rawTag, policy.MaxTagNameLength, out var token))
+            {
+                // 注释、声明、处理指令：不是元素标签，整段丢弃。
+                index = tagEnd;
+                continue;
+            }
+
+            if (stripTags.Count > 0)
+            {
+                ConsumeStripToken(token, stripTags);
+                index = tagEnd;
+                continue;
+            }
+
+            HandleInlineHtml(
+                rawTag,
+                node,
+                ref activeParent,
+                openTags,
+                stripTags,
+                diagnostics,
+                blockRange,
+                ref depthReported,
+                policy,
+                BlockScope,
+                BlockSectionName);
+
+            index = tagEnd;
+        }
+
+        AddBlockHtmlText(activeParent, text);
+        CloseUnclosedInlineHtml(openTags, diagnostics, BlockScope, blockRange);
+    }
+
+    /// <summary>
+    /// 把一段块内文本落成 <c>Text</c> 节点：先做一次实体解码，交给渲染器时再统一转义，
+    /// 避免 <c>&amp;amp;</c> 被二次转义。<c>strip</c> 段的文字不会走到这里。
+    /// </summary>
+    private void AddBlockHtmlText(MarkdownNode parent, StringBuilder text)
+    {
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        var value = WebUtility.HtmlDecode(text.ToString());
+        text.Clear();
+
+        if (value.Length == 0)
+        {
+            return;
+        }
+
+        parent.AddChild(_nodeFactory.Create(NodeType.Text, NodeCategory.Inline, text: value));
+    }
+
+    /// <summary>
+    /// 从 <paramref name="start"/> 起读出一个标签跨度（含结尾 <c>&gt;</c>）。
+    /// 引号内的 <c>&gt;</c> 不算结束；注释按 <c>--&gt;</c> 收口；
+    /// 不是标签起点的 <c>&lt;</c>（如 <c>a &lt; b</c>）返回 <c>false</c>，按普通文字处理。
+    /// </summary>
+    private static bool TryReadTagSpan(string text, int start, out int end)
+    {
+        end = start;
+        if (start < 0 || start + 1 >= text.Length || text[start] != '<')
+        {
+            return false;
+        }
+
+        var next = text[start + 1];
+        if (next is '!' or '?')
+        {
+            if (text.AsSpan(start).StartsWith("<!--", StringComparison.Ordinal))
+            {
+                var commentEnd = text.IndexOf("-->", start + 4, StringComparison.Ordinal);
+                if (commentEnd < 0)
+                {
+                    return false;
+                }
+
+                end = commentEnd + 3;
+                return true;
+            }
+
+            var declarationEnd = text.IndexOf('>', start + 2);
+            if (declarationEnd < 0)
+            {
+                return false;
+            }
+
+            end = declarationEnd + 1;
+            return true;
+        }
+
+        var nameIndex = next == '/' ? start + 2 : start + 1;
+        if (nameIndex >= text.Length || !IsAsciiLetter(text[nameIndex]))
+        {
+            return false;
+        }
+
+        var quote = '\0';
+        for (var index = start + 1; index < text.Length; index++)
+        {
+            var ch = text[index];
+            if (quote != '\0')
+            {
+                if (ch == quote)
+                {
+                    quote = '\0';
+                }
+
+                continue;
+            }
+
+            if (ch is '"' or '\'')
+            {
+                quote = ch;
+                continue;
+            }
+
+            if (ch == '>')
+            {
+                end = index + 1;
+                return true;
+            }
+
+            if (ch == '<')
+            {
+                return false; // 前一个标签没有闭合：把这整段按普通文字处理
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsAsciiLetter(char ch) => ch is >= 'a' and <= 'z' or >= 'A' and <= 'Z';
+
+    private static string TruncateForDiagnostic(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        return value.Length <= 64 ? value : value[..64] + "…";
+    }
+
+    /// <summary>
+    /// 把首行标签的识别结果落到已创建好的节点上。识别本身在
+    /// <see cref="QuoteLabelClassifier"/>，这里只做结构性消费。
+    /// </summary>
+    private static void ApplyQuoteLabel(
+        MarkdownNode quoteNode,
+        List<MarkdownNode> quoteChildren,
+        QuoteLabelClassification classification)
+    {
+        if (classification.Kind == QuoteLabelKind.None)
+        {
+            return;
+        }
+
+        var firstParagraph = quoteChildren
             .FirstOrDefault(child => child.Type == NodeType.Paragraph);
         if (firstParagraph is null)
         {
-            return false;
+            return;
         }
 
-        var firstLine = ReadFirstLineText(firstParagraph);
-        if (firstLine is null)
+        if (classification.Kind == QuoteLabelKind.CustomBlock)
         {
-            return false;
+            quoteNode.SetDerivedAttribute("custom-kind", classification.MappedKind);
         }
-
-        var match = CustomBlockLabelRegex.Match(firstLine);
-        if (!match.Success)
+        else
         {
-            return false;
+            quoteNode.SetDerivedAttribute("admonition", classification.MappedKind);
+            quoteNode.SetDerivedAttribute("admonition-title", classification.Title);
         }
 
-        if (!AdmonitionCatalog.TryMapCustomBlockLabel(match.Groups["kind"].Value, out var kind))
-        {
-            return false;
-        }
-
-        quoteNode.Type = NodeType.Custom;
-        quoteNode.Category = NodeCategory.Block;
-        quoteNode.Attributes["custom-kind"] = kind;
-
-        ConsumeInlinePrefix(firstParagraph, match.Groups["body"].Index);
+        ConsumeInlinePrefix(firstParagraph, classification.PrefixLength);
         RemoveLeadingLineBreaks(firstParagraph);
 
-        firstParagraph.Text = BuildInlineText(firstParagraph.Children);
+        if (classification.Kind == QuoteLabelKind.CustomBlock)
+        {
+            firstParagraph.Text = BuildInlineText(firstParagraph.Children);
+            quoteNode.Text = GetInlineText(quoteNode);
+        }
+    }
 
-        return true;
+    private static string? ReadFirstLineText(List<MarkdownNode> children)
+    {
+        var firstParagraph = children.FirstOrDefault(child => child.Type == NodeType.Paragraph);
+        return firstParagraph is null ? null : ReadFirstLineText(firstParagraph);
     }
 
     private static void ConsumeInlinePrefix(MarkdownNode firstParagraph, int remaining)
@@ -1079,50 +1493,6 @@ public sealed class MarkdigToNodeConverter
         }
     }
 
-    private static readonly System.Text.RegularExpressions.Regex AdmonitionLabelRegex =
-        new(
-            @"^\[!(?<label>[A-Za-z][A-Za-z0-9_-]{0,20})\](?:[ \t]+(?<title>.+?))?[ \t]*$",
-            System.Text.RegularExpressions.RegexOptions.Compiled);
-
-    private static bool TryClassifyAdmonition(MarkdownNode quoteNode)
-    {
-        var firstParagraph = quoteNode.Children
-            .FirstOrDefault(child => child.Type == NodeType.Paragraph);
-        if (firstParagraph is null)
-        {
-            return false;
-        }
-
-        var firstLine = ReadFirstLineText(firstParagraph);
-        if (firstLine is null)
-        {
-            return false;
-        }
-
-        var match = AdmonitionLabelRegex.Match(firstLine);
-        if (!match.Success)
-        {
-            return false;
-        }
-
-        if (!AdmonitionCatalog.TryMapAdmonitionLabel(match.Groups["label"].Value, out var kind))
-        {
-            return false;
-        }
-
-        var title = match.Groups["title"].Success
-            ? match.Groups["title"].Value.Trim()
-            : AdmonitionCatalog.GetDefaultTitle(kind);
-
-        quoteNode.Attributes["admonition"] = kind;
-        quoteNode.Attributes["admonition-title"] = title;
-
-        ConsumeInlinePrefix(firstParagraph, match.Length);
-        RemoveLeadingLineBreaks(firstParagraph);
-
-        return true;
-    }
-
     private static string? ReadFirstLineText(MarkdownNode paragraph)
     {
         var builder = new System.Text.StringBuilder();
@@ -1144,54 +1514,6 @@ public sealed class MarkdigToNodeConverter
         return line.Length == 0 ? null : line;
     }
 
-    private static SourceRange ExtractSourceRange(MarkdownObject? obj)
-    {
-        if (obj == null || obj.Span.Start < 0)
-        {
-            return SourceRange.Empty();
-        }
-
-        var startOffset = Math.Max(0, obj.Span.Start);
-        var length = Math.Max(0, obj.Span.Length);
-        var startLine = Math.Max(1, obj.Line + 1);
-        var startColumn = Math.Max(1, obj.Column + 1);
-
-        int endLine = startLine;
-        int endColumn = startColumn + length;
-
-        if (obj is ImageMatrixBlock { ClosingFenceLineIndex: >= 0 } matrixFence)
-        {
-            endLine = matrixFence.ClosingFenceLineIndex.Value + 1;
-        }
-        else if (obj is PoemBlock { ClosingFenceLineIndex: >= 0 } poemFence)
-        {
-            endLine = poemFence.ClosingFenceLineIndex.Value + 1;
-        }
-        else if (obj is TimelineBlock { ClosingFenceLineIndex: >= 0 } timelineFence)
-        {
-            endLine = timelineFence.ClosingFenceLineIndex.Value + 1;
-        }
-        else if (obj is RadarBlock { ClosingFenceLineIndex: >= 0 } radarFence)
-        {
-            endLine = radarFence.ClosingFenceLineIndex.Value + 1;
-        }
-        else if (obj is LeafBlock leafBlock && leafBlock.Lines.Lines != null && leafBlock.Lines.Count > 0)
-        {
-            endLine = startLine + leafBlock.Lines.Count - 1;
-            var lastSlice = leafBlock.Lines.Lines[leafBlock.Lines.Count - 1];
-            endColumn = lastSlice.Slice.Length + 1;
-        }
-
-        return new SourceRange
-        {
-            StartOffset = startOffset,
-            Length = length,
-            StartLine = startLine,
-            StartColumn = startColumn,
-            EndLine = endLine,
-            EndColumn = endColumn
-        };
-    }
 
     private static void PopulateRawMarkdown(MarkdownNode node, string source)
     {
@@ -1284,8 +1606,8 @@ public sealed class MarkdigToNodeConverter
             NodeCategory.Inline,
             range: range);
 
-        autoLinkNode.Attributes["href"] = hrefValue;
-        autoLinkNode.Attributes["url"] = hrefValue;
+        autoLinkNode.SetDerivedAttribute("href", hrefValue);
+        autoLinkNode.SetDerivedAttribute("url", hrefValue);
         autoLinkNode.Text = displayValue;
 
         parentNode.AddChild(autoLinkNode);
@@ -1326,129 +1648,49 @@ public sealed class MarkdigToNodeConverter
     }
 
     /// <summary>
-    /// 把古诗块正文解析为可展开的虚拟子部件（标题/作者/朝代/体裁 +
+    /// 按 parser 侧给出的诗体切片建虚拟子部件（标题/作者/朝代/体裁 +
     /// 诗句组/诗句 + 出处/说明）。子节点 IsSynthetic、共享古诗块源码区间，
-    /// 仅承载各自 LocalStyle；解析规则与预览渲染保持一致。
+    /// 仅承载各自 LocalStyle；切分规则已移出转换器。
     /// </summary>
-    private void BuildPoemParts(MarkdownNode poemNode)
+    private void ApplyPoemLayout(MarkdownNode poemNode, PoemLayout layout)
     {
-        var normalized = (poemNode.Text ?? string.Empty).Replace("\r\n", "\n");
-
-        SplitPoemSections(normalized, out var metadataText, out var bodyText);
-        var metadata = ParsePoemMetadata(metadataText);
-        var partRange = poemNode.Range;
-
-        MarkdownNode CreatePart(NodeType type, NodeCategory category, string text)
+        MarkdownNode CreatePart(NodeType type, NodeCategory category, string text, SourceRange range)
         {
-            var part = _nodeFactory.Create(type, category, text: text, range: partRange);
+            var part = _nodeFactory.Create(type, category, text: text, range: range);
             part.IsSynthetic = true;
             return part;
         }
 
-        void AddField(NodeType type, string? value)
+        foreach (var field in layout.Header)
         {
-            if (!string.IsNullOrWhiteSpace(value))
-                poemNode.AddChild(CreatePart(type, NodeCategory.Inline, value!));
+            poemNode.AddChild(CreatePart(MapPoemField(field.Kind), NodeCategory.Inline, field.Text, field.Range));
         }
 
-        AddField(NodeType.PoemTitle, GetMeta(metadata, "title"));
-        AddField(NodeType.PoemAuthor, GetMeta(metadata, "author"));
-        AddField(NodeType.PoemDynasty, GetMeta(metadata, "dynasty"));
-        AddField(NodeType.PoemForm, GetMeta(metadata, "form"));
-
-        var stanzaStarted = false;
-        MarkdownNode? stanza = null;
-        foreach (var raw in bodyText.Split('\n'))
+        foreach (var stanza in layout.Stanzas)
         {
-            if (raw.Length == 0)
+            var stanzaNode = CreatePart(NodeType.PoemStanza, NodeCategory.Container, string.Empty, stanza.Range);
+            poemNode.AddChild(stanzaNode);
+            foreach (var line in stanza.Lines)
             {
-                stanzaStarted = false;
-                stanza = null;
-                continue;
+                stanzaNode.AddChild(CreatePart(NodeType.PoemLine, NodeCategory.Inline, line.Text, line.Range));
             }
-
-            if (!stanzaStarted)
-            {
-                stanza = CreatePart(NodeType.PoemStanza, NodeCategory.Container, string.Empty);
-                poemNode.AddChild(stanza);
-                stanzaStarted = true;
-            }
-
-            stanza!.AddChild(CreatePart(NodeType.PoemLine, NodeCategory.Inline, raw));
         }
 
-        AddField(NodeType.PoemSource, GetMeta(metadata, "source"));
-        AddField(NodeType.PoemNote, GetMeta(metadata, "note"));
+        foreach (var field in layout.Footer)
+        {
+            poemNode.AddChild(CreatePart(MapPoemField(field.Kind), NodeCategory.Inline, field.Text, field.Range));
+        }
     }
 
-    private static string? GetMeta(Dictionary<string, string> metadata, string key) =>
-        metadata.TryGetValue(key, out var value) ? value : null;
-
-    /// <summary>
-    /// 与预览渲染一致的元数据/正文切分：以首个单独的 "---" 行为界。
-    /// </summary>
-    private static void SplitPoemSections(
-        string normalized,
-        out string metadataText,
-        out string bodyText)
+    private static NodeType MapPoemField(PoemFieldKind kind) => kind switch
     {
-        metadataText = string.Empty;
-        bodyText = string.Empty;
-
-        if (normalized.StartsWith("---\n", StringComparison.Ordinal))
-        {
-            bodyText = normalized.Substring(4);
-            return;
-        }
-
-        if (normalized == "---")
-            return;
-
-        var sepIdx = normalized.IndexOf("\n---\n", StringComparison.Ordinal);
-        if (sepIdx >= 0)
-        {
-            metadataText = normalized.Substring(0, sepIdx);
-            bodyText = normalized.Substring(sepIdx + 5);
-            return;
-        }
-
-        sepIdx = normalized.IndexOf("\n---", StringComparison.Ordinal);
-        if (sepIdx >= 0)
-        {
-            metadataText = normalized.Substring(0, sepIdx);
-            bodyText = sepIdx + 4 < normalized.Length
-                ? normalized.Substring(sepIdx + 4)
-                : string.Empty;
-            return;
-        }
-
-        bodyText = normalized;
-    }
-
-    private static Dictionary<string, string> ParsePoemMetadata(string metadataText)
-    {
-        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (string.IsNullOrWhiteSpace(metadataText))
-            return result;
-
-        foreach (var raw in metadataText.Split('\n'))
-        {
-            var line = raw.Trim();
-            if (line.Length == 0)
-                continue;
-
-            var colonIdx = line.IndexOf(':');
-            if (colonIdx <= 0)
-                continue;
-
-            var key = line.Substring(0, colonIdx).Trim();
-            var value = line.Substring(colonIdx + 1).Trim();
-            if (key.Length > 0)
-                result[key] = value;
-        }
-
-        return result;
-    }
+        PoemFieldKind.Title => NodeType.PoemTitle,
+        PoemFieldKind.Author => NodeType.PoemAuthor,
+        PoemFieldKind.Dynasty => NodeType.PoemDynasty,
+        PoemFieldKind.Form => NodeType.PoemForm,
+        PoemFieldKind.Source => NodeType.PoemSource,
+        _ => NodeType.PoemNote
+    };
 
     // ── 脚注标签 / slug ──────────────────────────────────────────────
 

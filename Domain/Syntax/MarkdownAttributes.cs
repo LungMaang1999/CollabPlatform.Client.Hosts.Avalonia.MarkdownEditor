@@ -19,6 +19,12 @@ public static class MarkdownAttributes
     public const string Icon = "icon";
 
     /// <summary>
+    /// 值为 "true" 表示该自定义块的子内容违反了定义声明的内容模型。
+    /// 内容照常渲染，只作标记；重解析按新树结果决定，不能从旧树继承。
+    /// </summary>
+    public const string ContentViolation = "content-violation";
+
+    /// <summary>
     /// 全部由解析器按当前源码派生的属性键。重解析后身份匹配只继承用户自定义
     /// 属性（ChangeAttributeCommand/持久化恢复），这些键必须以新树解析结果
     /// 为准，不能从旧树继承（如围栏 info string 被编辑后 language 要能消失）。
@@ -26,6 +32,7 @@ public static class MarkdownAttributes
     public static readonly IReadOnlySet<string> SourceDerivedKeys = new HashSet<string>(StringComparer.Ordinal)
     {
         Unclosed,
+        ContentViolation,
         "checked",
         "index",
         "id",
@@ -46,6 +53,15 @@ public static class MarkdownAttributes
         "timeline-side-effective",
         "timeline-layout",
         "timeline-line",
-        "timeline-gap"
+        "timeline-gap",
+        "timeline-sort",
+        // 雷达图参数：解析器仅在非默认值时落盘，必须视为派生键，
+        // 否则改回默认值（如 labels=hide）后旧值会被当自定义属性继承回来。
+        "radar-title",
+        "radar-labels",
+        "radar-scale",
+        "radar-legend",
+        "radar-fill",
+        "radar-size"
     };
 }

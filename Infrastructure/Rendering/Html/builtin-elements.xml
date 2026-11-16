@@ -1,0 +1,754 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  内置类型结构描述（唯一来源）。
+  约定：
+  - 只写名字与标志，内容写入器/样式配方/生成器/安全策略的实现都留在代码。
+  - 除提示块/自定义块/时间线（现状输出带 data-part）外，其余内置描述的部件都不可寻址。
+  - 一个定义只描述一条结构；同类型多档位写多条并用 variant 区分（default/card/minimal/left/right/center）。
+  - 属性驱动的结构用 selector 声明命中侧（admonition:present / admonition:absent）。
+  - Document/Section 与诗体虚拟部件只服务“看结构”，rendering 仍由各自路径承担，故 render="false"。
+-->
+<elements version="1">
+
+  <!-- ── 透明容器 ─────────────────────────────────────────────── -->
+  <element id="builtin-document" applies-to="Document" render="false">
+    <structure>
+      <part slot="root" addressable="false"/>
+    </structure>
+  </element>
+
+  <element id="builtin-section" applies-to="Section" render="false">
+    <structure>
+      <part slot="root" addressable="false"/>
+    </structure>
+  </element>
+
+  <!-- ── 块级骨架 ─────────────────────────────────────────────── -->
+  <element id="builtin-heading" applies-to="Heading">
+    <attributes>
+      <attribute key="level" kind="Enum">
+        <allowed value="1"/>
+        <allowed value="2"/>
+        <allowed value="3"/>
+        <allowed value="4"/>
+        <allowed value="5"/>
+        <allowed value="6"/>
+      </attribute>
+    </attributes>
+    <structure>
+      <part slot="root" addressable="false" tag="h{level}" content="children"/>
+    </structure>
+  </element>
+
+  <element id="builtin-paragraph" applies-to="Paragraph">
+    <structure>
+      <part slot="root" addressable="false" tag="p" content="children"/>
+    </structure>
+  </element>
+
+  <element id="builtin-text" applies-to="Text">
+    <structure>
+      <part slot="root" addressable="false" tag="span" tag-if="inline-style" content="text"/>
+    </structure>
+  </element>
+
+  <element id="builtin-line-break" applies-to="LineBreak">
+    <structure>
+      <part slot="root" addressable="false" tag="br" no-identity="true" self-closing="true"/>
+    </structure>
+  </element>
+
+  <element id="builtin-unordered-list" applies-to="UnorderedList">
+    <structure>
+      <part slot="root" addressable="false" tag="ul" content="children"/>
+    </structure>
+  </element>
+
+  <element id="builtin-ordered-list" applies-to="OrderedList">
+    <structure>
+      <part slot="root" addressable="false" tag="ol" content="children"/>
+    </structure>
+  </element>
+
+  <element id="builtin-list-item" applies-to="ListItem">
+    <structure>
+      <part slot="root" addressable="false" tag="li" content="children"/>
+    </structure>
+  </element>
+
+  <element id="builtin-task-list-item" applies-to="TaskListItem">
+    <structure>
+      <part slot="root" addressable="false" tag="li" class="task-list-item" content="task-list"/>
+    </structure>
+  </element>
+
+  <element id="builtin-code-block" applies-to="CodeBlock">
+    <structure>
+      <part slot="root" addressable="false" tag="pre">
+        <part slot="content" role="content" addressable="false" tag="code" class-recipe="language" content="code-block"/>
+      </part>
+    </structure>
+  </element>
+
+  <element id="builtin-thematic-break" applies-to="ThematicBreak">
+    <structure>
+      <part slot="root" addressable="false" tag="hr" self-closing="true"/>
+    </structure>
+  </element>
+
+  <!-- ── 表格 ────────────────────────────────────────────────── -->
+  <element id="builtin-table" applies-to="Table">
+    <structure>
+      <part slot="root" addressable="false" tag="div" class="table-scroll" suppress-style="true">
+        <part slot="wrapper" role="wrapper" addressable="false" tag="table" emit-node-style="true" content="children"/>
+      </part>
+    </structure>
+  </element>
+
+  <element id="builtin-table-row" applies-to="TableRow">
+    <structure>
+      <part slot="root" addressable="false" tag="tr" css="table-row-vars" content="children"/>
+    </structure>
+  </element>
+
+  <element id="builtin-table-cell" applies-to="TableCell">
+    <attributes>
+      <attribute key="header-tag" kind="Enum">
+        <allowed value="th"/>
+        <allowed value="td"/>
+      </attribute>
+    </attributes>
+    <structure>
+      <part slot="root" addressable="false" tag="{header-tag}" content="tight-children"/>
+    </structure>
+  </element>
+
+  <!-- ── 行内元素 ─────────────────────────────────────────────── -->
+  <element id="builtin-link" applies-to="Link">
+    <structure>
+      <part slot="root" addressable="false" tag="a" policy="link" attrs-after-identity="true"
+            content="link" attr="node:url:link@href"/>
+    </structure>
+  </element>
+
+  <element id="builtin-image" applies-to="Image">
+    <structure>
+      <part slot="root" addressable="false" tag="img" policy="image" self-closing="true"
+            attrs-after-identity="true" css="align-block"
+            attr="node:url:image@src literal:lazy@loading node-text@alt"/>
+    </structure>
+  </element>
+
+  <element id="builtin-strong" applies-to="Strong">
+    <structure>
+      <part slot="root" addressable="false" tag="strong" content="inline"/>
+    </structure>
+  </element>
+
+  <element id="builtin-emphasis" applies-to="Emphasis">
+    <structure>
+      <part slot="root" addressable="false" tag="em" content="inline"/>
+    </structure>
+  </element>
+
+  <element id="builtin-delete" applies-to="Delete">
+    <structure>
+      <part slot="root" addressable="false" tag="del" content="inline"/>
+    </structure>
+  </element>
+
+  <element id="builtin-subscript" applies-to="Subscript">
+    <structure>
+      <part slot="root" addressable="false" tag="sub" content="inline"/>
+    </structure>
+  </element>
+
+  <element id="builtin-superscript" applies-to="Superscript">
+    <structure>
+      <part slot="root" addressable="false" tag="sup" content="inline"/>
+    </structure>
+  </element>
+
+  <element id="builtin-inserted" applies-to="Inserted">
+    <structure>
+      <part slot="root" addressable="false" tag="ins" content="inline"/>
+    </structure>
+  </element>
+
+  <element id="builtin-marked" applies-to="Marked">
+    <structure>
+      <part slot="root" addressable="false" tag="mark" content="inline"/>
+    </structure>
+  </element>
+
+  <element id="builtin-inline-code" applies-to="InlineCode">
+    <structure>
+      <part slot="root" addressable="false" tag="code" content="text"/>
+    </structure>
+  </element>
+
+  <!-- ── 脚注 ────────────────────────────────────────────────── -->
+  <element id="builtin-footnote-link" applies-to="FootnoteLink">
+    <structure slots="anchor">
+      <part slot="root" addressable="false" tag="sup" class="footnote-ref" no-identity="true">
+        <part slot="anchor" role="content" addressable="false" tag="a" policy="backlink"
+              emit-node-style="true" content="footnote-label"
+              attr="node:anchor@id node:href:backlink@href ref:target@data-footnote-target"/>
+      </part>
+    </structure>
+  </element>
+
+  <element id="builtin-footnote-group" applies-to="FootnoteGroup">
+    <structure>
+      <part slot="root" addressable="false" tag="section" class="footnotes" no-identity="true" content="children"/>
+    </structure>
+  </element>
+
+  <element id="builtin-footnote" applies-to="Footnote">
+    <structure slots="index,anchor,backref-icon">
+      <part slot="root" addressable="false" tag="div" class="footnote-item" attr="node:id@id">
+        <part slot="index" role="title" addressable="false" tag="span" class="footnote-index" content="footnote-label"/>
+        <part slot="content" role="content" addressable="false" tag="div" class="footnote-content" content="tight-children">
+          <part slot="wrapper" role="content" addressable="false" repeat="backrefs" content="space">
+            <part slot="anchor" role="meta" addressable="false" tag="a" policy="backlink"
+                  class="footnote-backref"
+                  attr="ref:backref-href@href ref:backref-item@data-footnote-target
+                        ref:backref-title@title ref:backref-aria-label@aria-label">
+              <part slot="backref-icon" role="meta" addressable="false" tag="span"
+                    class="footnote-backref-icon" content="backref-icon"/>
+            </part>
+          </part>
+        </part>
+      </part>
+    </structure>
+  </element>
+
+  <!-- ── 不发射与生成型 ───────────────────────────────────────── -->
+  <element id="builtin-yaml-front-matter" applies-to="YamlFrontMatter">
+    <structure>
+      <part slot="root" addressable="false" emit="none"/>
+    </structure>
+  </element>
+
+  <element id="builtin-math-inline" applies-to="MathInline">
+    <structure>
+      <part slot="root" addressable="false" tag="span" class="math math-inline" generator="math"/>
+    </structure>
+  </element>
+
+  <element id="builtin-math-block" applies-to="MathBlock">
+    <structure>
+      <part slot="root" addressable="false" tag="div" class="math math-block" generator="math" css="math-vars"/>
+    </structure>
+  </element>
+
+  <element id="builtin-mermaid" applies-to="Mermaid">
+    <structure>
+      <part slot="root" addressable="false" tag="div" class="mermaid" class-recipe="mermaid-state"
+            generator="mermaid" css="align-inline"/>
+    </structure>
+  </element>
+
+  <element id="builtin-image-matrix" applies-to="ImageMatrix">
+    <structure>
+      <part slot="root" addressable="false" tag="div" class="image-matrix" class-recipe="matrix-state"
+            generator="image-matrix" css="matrix-vars"/>
+    </structure>
+  </element>
+
+  <element id="builtin-qrcode" applies-to="QrCode">
+    <structure>
+      <part slot="root" addressable="false" tag="figure" class="qrcode-block" class-recipe="qrcode-state"
+            generator="qrcode" css="align-inline"/>
+    </structure>
+  </element>
+
+  <!-- ── 诗体 ────────────────────────────────────────────────── -->
+  <element id="builtin-poem-block" applies-to="PoemBlock" structure-key="poem">
+    <structure slots="header,author,dynasty,form,stanza,line,source,note">
+      <part slot="root" addressable="false" tag="div" class="poem-block" class-recipe="poem-state">
+        <part slot="header" role="header" addressable="false" tag="div" class="poem-header"
+              source-condition="poem-header">
+          <part slot="title" role="title" addressable="false" tag="h3" class="poem-title"
+                source-condition="poem-title" emit-node-style="true" content="current-node-text"/>
+          <part slot="meta" role="meta" addressable="false" tag="div" class="poem-author-line"
+                source-condition="poem-author-line">
+            <part slot="author" role="meta" addressable="false" tag="span" class="poem-author"
+                  source-condition="poem-author" emit-node-style="true" content="current-node-text"/>
+            <part slot="dynasty" role="meta" addressable="false" tag="span" class="poem-dynasty"
+                  source-condition="poem-dynasty" emit-node-style="true" content="current-node-text"/>
+          </part>
+          <part slot="form" role="meta" addressable="false" tag="div" class="poem-form"
+                source-condition="poem-form" emit-node-style="true" content="current-node-text"/>
+        </part>
+        <part slot="body" role="content" addressable="false" tag="div" class="poem-body">
+          <part slot="stanza" role="wrapper" addressable="false" tag="div" class="poem-stanza"
+                repeat="stanzas" repeat-max="32" emit-node-style="true" content="nothing">
+            <part slot="line" role="content" addressable="false" tag="p" class="poem-line"
+                  repeat="lines" repeat-max="64" emit-node-style="true" content="current-node-text"/>
+          </part>
+        </part>
+        <part slot="source" role="meta" addressable="false" tag="div" class="poem-source"
+              source-condition="poem-source" emit-node-style="true" content="current-node-text"/>
+        <part slot="wrapper" role="meta" addressable="false" source-condition="poem-source-and-note"
+              content="poem-meta-break"/>
+        <part slot="note" role="meta" addressable="false" tag="div" class="poem-note"
+              source-condition="poem-note" emit-node-style="true" content="current-node-text"/>
+      </part>
+    </structure>
+  </element>
+
+  <!-- ── 时间线条目 ───────────────────────────────────────────── -->
+  <element id="builtin-timeline-item" applies-to="TimelineItem">
+    <structure slots="rail,dot,time,tags,tag">
+      <part slot="root" addressable="false" tag="div" class="md-tl-item" suppress-style="true"
+            attr="node:timeline-side-effective@data-side">
+        <part slot="rail" role="rail" addressable="false" tag="div" class="md-tl-rail"
+              attr="literal:true@aria-hidden">
+          <part slot="dot" role="dot" addressable="false" tag="span" class="md-tl-dot"/>
+        </part>
+        <part slot="content" role="content" addressable="false" tag="div" class="md-tl-content"
+              emit-node-style="true">
+          <part slot="meta" role="meta" addressable="false" tag="div" class="md-tl-meta">
+            <part slot="time" role="meta" addressable="false" tag="time" class="md-tl-time"
+                  class-recipe="timeline-time-state" content="timeline-time"/>
+            <part slot="tags" role="meta" addressable="false" tag="div" class="md-tl-tags"
+                  emit-when-collection="timeline-tags">
+              <part slot="tag" role="meta" addressable="false" tag="span" class="md-tl-tag"
+                    repeat="timeline-tags" content="repeat-item"/>
+            </part>
+          </part>
+          <part slot="body" role="content" addressable="false" tag="div" class="md-tl-body" content="children"/>
+        </part>
+      </part>
+    </structure>
+  </element>
+
+  <!-- ── 雷达图 ───────────────────────────────────────────────── -->
+  <element id="builtin-radar" applies-to="Radar">
+    <structure>
+      <part slot="root" addressable="false" tag="figure" class="md-radar" class-recipe="radar-state"
+            generator="radar" suppress-style="true"/>
+    </structure>
+  </element>
+
+  <!-- ── 原始 HTML ────────────────────────────────────────────── -->
+  <!-- 块级 HTML 同样走“解析期净化”：块内标签按 <block-html> 单独判定，
+       不与 <inline-html> 取并集；根 part 改成 content="children"，
+       未声明 <block-html> 时解析器不产生子节点，仍由 Text 整段转义（逐字节不变）。
+       本版只放行结构性容器，行内标签要在块里用，必须在 <block-html> 也声明。 -->
+  <element id="builtin-html-block" applies-to="HtmlBlock">
+    <structure>
+      <part slot="root" addressable="false" tag="div" content="children"/>
+    </structure>
+    <block-html>
+      <tag name="div" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="section" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="article" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="aside" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="header" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="footer" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="nav" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="main" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="figure" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="figcaption" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="p" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="h1" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="h2" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="h3" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="h4" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="h5" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="h6" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="ul" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="ol" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="li" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="dl" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="dt" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="dd" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="blockquote" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="pre" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="hr" void="true" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+    </block-html>
+  </element>
+
+  <!-- ── 行内 HTML（受控白名单） ─────────────────────────────── -->
+  <!-- 外形由实例决定（标签名与已放行属性都来自解析结果），因此本定义不写 structure，
+       也不参与模板编译；它只提供解析期的白名单：机制地板之外的收窄口径。
+       本版放行“无行为、无资源”的排版标签 + 受控链接 a + 受控图片 img；
+       iframe / object / embed / svg / math 一律不进（机制地板永久禁止）。
+       属性只留 title / lang / dir（a 另加 href/title，img 另加 src/alt/width/height）：
+       class / data-* / id 由机制地板拒绝——本项目样式必须从定义来，
+       放开 class 等于让手写标签蹭到应用样式表。
+       style 单独走“标签开关 + 布局子集”通道（style-layout="true"）：值必须过
+       UserBlockStyleRules 的布局档规范化，否则整条属性丢弃，绝不回写原文。 -->
+  <element id="builtin-inline-html" applies-to="HtmlInline" name="inline-html" render="true">
+    <inline-html>
+      <tag name="span" style-layout="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="br" void="true">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="em">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="strong">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="b">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="i">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="u">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="s">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="del">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="ins">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="mark">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="small">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="sub">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="sup">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="kbd">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="code">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="abbr">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="cite">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="q">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="dfn">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="var">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <tag name="samp">
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+      </tag>
+      <!-- 链接：协议与 md 链接既有白名单一致（http/https/mailto/tel）。
+           target / rel 只走机制层常量通道：作者写不出这两个名，实例值也永远被拒。
+           只有绝对 http/https 才补新窗口与反向前置断开；相对路径、mailto、tel 原地导航。 -->
+      <tag name="a">
+        <attribute name="href" kind="url" protocols="http,https,mailto,tel" max-length="2048"/>
+        <attribute name="title"/>
+        <attribute name="lang"/>
+        <attribute name="dir"/>
+        <attribute name="target" value-source="constant" constant="_blank" when="absolute-http"/>
+        <attribute name="rel" value-source="constant" constant="noopener noreferrer" when="absolute-http"/>
+      </tag>
+      <!-- 图片：只认 http/https 与相对路径；data: / file: 由机制地板拒绝。
+           这与 md 图片允许 data:image/ 的既存口径不同，原因见
+           docs/inline-html-allowlist.md「为什么手写 <img> 不允许 data:」。 -->
+      <tag name="img" void="true">
+        <attribute name="src" kind="url" protocols="http,https" max-length="2048"/>
+        <attribute name="alt"/>
+        <attribute name="width" kind="integer" min="1" max="2048"/>
+        <attribute name="height" kind="integer" min="1" max="2048"/>
+      </tag>
+    </inline-html>
+  </element>
+
+  <!-- ── 诗体虚拟部件（只描述形制，不参与发射） ────────────────── -->
+  <element id="builtin-poem-title" applies-to="PoemTitle" render="false">
+    <structure>
+      <part slot="root" addressable="false" tag="h3" role="title" class="poem-title"/>
+    </structure>
+  </element>
+
+  <element id="builtin-poem-author" applies-to="PoemAuthor" render="false">
+    <structure>
+      <part slot="root" addressable="false" tag="span" role="meta" class="poem-author"/>
+    </structure>
+  </element>
+
+  <element id="builtin-poem-dynasty" applies-to="PoemDynasty" render="false">
+    <structure>
+      <part slot="root" addressable="false" tag="span" role="meta" class="poem-dynasty"/>
+    </structure>
+  </element>
+
+  <element id="builtin-poem-form" applies-to="PoemForm" render="false">
+    <structure>
+      <part slot="root" addressable="false" tag="div" role="meta" class="poem-form"/>
+    </structure>
+  </element>
+
+  <element id="builtin-poem-stanza" applies-to="PoemStanza" render="false">
+    <structure>
+      <part slot="root" addressable="false" tag="div" role="wrapper" class="poem-stanza"/>
+    </structure>
+  </element>
+
+  <element id="builtin-poem-line" applies-to="PoemLine" render="false">
+    <structure>
+      <part slot="root" addressable="false" tag="p" role="content" class="poem-line"/>
+    </structure>
+  </element>
+
+  <element id="builtin-poem-source" applies-to="PoemSource" render="false">
+    <structure>
+      <part slot="root" addressable="false" tag="div" role="meta" class="poem-source"/>
+    </structure>
+  </element>
+
+  <element id="builtin-poem-note" applies-to="PoemNote" render="false">
+    <structure>
+      <part slot="root" addressable="false" tag="div" role="meta" class="poem-note"/>
+    </structure>
+  </element>
+
+  <!-- ── 提示块：admonition 存在时两档结构，缺失时普通引用 ───────── -->
+  <element id="builtin-quote-present" applies-to="Quote" selector="admonition:present">
+    <structure>
+      <part slot="root" tag="blockquote" class="admonition" class-recipe="admonition-kind" css="accent-adm">
+        <part slot="title" tag="p" class="admonition-title">
+          <part slot="icon" tag="span" class="admonition-icon" content="admonition-icon"/>
+          <part slot="title-text" tag="span" class="admonition-title-text" content="admonition-title-text"/>
+        </part>
+        <part slot="content" content="children"/>
+      </part>
+    </structure>
+  </element>
+
+  <element id="builtin-quote-present-card" applies-to="Quote" variant="card" selector="admonition:present">
+    <structure>
+      <part slot="root" tag="div" class="admonition admonition-card" class-recipe="admonition-kind" css="accent-adm">
+        <part slot="title" tag="header" class="admonition-title">
+          <part slot="icon" tag="span" class="admonition-icon" content="admonition-icon"/>
+          <part slot="title-text" tag="span" class="admonition-title-text" content="admonition-title-text"/>
+        </part>
+        <part slot="content" tag="div" class="admonition-body" content="children"/>
+      </part>
+    </structure>
+  </element>
+
+  <element id="builtin-quote-plain" applies-to="Quote" selector="admonition:absent">
+    <structure>
+      <part slot="root" addressable="false" tag="blockquote" content="children"/>
+    </structure>
+  </element>
+
+  <!-- ── 自定义块：默认带图标，极简只留正文 ─────────────────────── -->
+  <element id="builtin-custom-default" applies-to="Custom">
+    <structure>
+      <part slot="root" tag="div" class="custom-block" class-recipe="kind" css="accent-cb">
+        <part slot="icon" tag="span" class="custom-block-icon" content="custom-block-icon"/>
+        <part slot="body" tag="div" class="custom-block-body" content="children"/>
+      </part>
+    </structure>
+  </element>
+
+  <element id="builtin-custom-minimal" applies-to="Custom" variant="minimal">
+    <structure>
+      <part slot="root" tag="div" class="custom-block" class-recipe="kind-minimal" css="accent-cb">
+        <part slot="body" tag="div" class="custom-block-body" content="children"/>
+      </part>
+    </structure>
+  </element>
+
+  <!-- ── 时间线：同一结构四档布局 ───────────────────────────────── -->
+  <element id="builtin-timeline-default" applies-to="Timeline" item-marker="@@">
+    <structure>
+      <part slot="root" tag="div" class="md-timeline" class-recipe="timeline-layout" css="timeline-vars">
+        <part slot="content" child-collection="timeline-items" empty-collection="timeline-empty"/>
+      </part>
+    </structure>
+  </element>
+
+  <element id="builtin-timeline-left" applies-to="Timeline" variant="left">
+    <structure>
+      <part slot="root" tag="div" class="md-timeline" class-recipe="timeline-layout" css="timeline-vars">
+        <part slot="content" child-collection="timeline-items" empty-collection="timeline-empty"/>
+      </part>
+    </structure>
+  </element>
+
+  <element id="builtin-timeline-right" applies-to="Timeline" variant="right">
+    <structure>
+      <part slot="root" tag="div" class="md-timeline" class-recipe="timeline-layout" css="timeline-vars">
+        <part slot="content" child-collection="timeline-items" empty-collection="timeline-empty"/>
+      </part>
+    </structure>
+  </element>
+
+  <element id="builtin-timeline-center" applies-to="Timeline" variant="center">
+    <structure>
+      <part slot="root" tag="div" class="md-timeline" class-recipe="timeline-layout" css="timeline-vars">
+        <part slot="content" child-collection="timeline-items" empty-collection="timeline-empty"/>
+      </part>
+    </structure>
+  </element>
+
+</elements>

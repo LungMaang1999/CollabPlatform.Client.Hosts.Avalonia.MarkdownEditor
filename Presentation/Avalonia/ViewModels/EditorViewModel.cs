@@ -74,6 +74,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
             {
                 _activeDocument.StyleMutated -= OnActiveDocumentStyleMutated;
                 _activeDocument.StyleEditor.StyleCommitted -= ApplyNodeStyle;
+                _activeDocument.Document.UserBlockDefinitionsChanged -= OnActiveDocumentDefinitionsChanged;
                 _activeDocument.Dispose();
             }
 
@@ -83,6 +84,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
             {
                 _activeDocument.StyleMutated += OnActiveDocumentStyleMutated;
                 _activeDocument.StyleEditor.StyleCommitted += ApplyNodeStyle;
+                _activeDocument.Document.UserBlockDefinitionsChanged += OnActiveDocumentDefinitionsChanged;
             }
 
             OnPropertyChanged();
@@ -90,17 +92,22 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
             OnPropertyChanged(nameof(DocumentTitle));
             OnPropertyChanged(nameof(IsModified));
             OnPropertyChanged(nameof(HasFilePath));
+            OnPropertyChanged(nameof(CurrentFilePath));
             OnPropertyChanged(nameof(RootNode));
             OnPropertyChanged(nameof(ActiveStyleEditor));
             OnPropertyChanged(nameof(CurrentSourceMarkdown));
             OnPropertyChanged(nameof(DocumentRootNode));
             OnPropertyChanged(nameof(CanUndo));
             OnPropertyChanged(nameof(CanRedo));
+            TypeDefinitionsChanged?.Invoke();
         }
     }
 
     public NodeViewModel? RootNode => _activeDocument?.RootNode;
     public MarkdownNode? DocumentRootNode => _activeDocument?.Document.Root;
+
+    /// <summary>当前文档模型；画布求值需要它读取样式链与类型声明。</summary>
+    public MarkdownDocument? Document => _activeDocument?.Document;
     public string CurrentSourceMarkdown => _activeDocument?.Document.SourceMarkdown ?? string.Empty;
 
     public StyleEditorViewModel? ActiveStyleEditor => _activeDocument?.StyleEditor;
@@ -149,6 +156,9 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
     public bool IsModified => _activeDocument?.Document.IsModified ?? false;
 
     public bool HasFilePath => !string.IsNullOrWhiteSpace(_activeDocument?.FilePath);
+
+    /// <summary>当前文档的磁盘路径；无本地文件（浏览器通道/新建未保存）时返回 null。</summary>
+    public string? CurrentFilePath => _activeDocument?.FilePath;
 
     public string HtmlPreview
     {
@@ -207,6 +217,20 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
     /// <summary>供外部（如宿主编辑器）上报操作错误，显示在状态栏。传 null 清除。</summary>
     public void ReportError(string? message) => ErrorMessage = message;
 
+    /// <summary>
+    /// 打开期的伴随文件/自定义元素诊断：优先展示聚合摘要（如“3 个元素定义问题、
+    /// 2 处内容违规”），明细保留在 <see cref="IDocumentService.CurrentLoadDiagnostics"/>。
+    /// 不中断文档显示；正常打开不覆盖已有错误信息。
+    /// </summary>
+    private void ReportLoadDiagnostics()
+    {
+        var diagnostics = _documentService.CurrentLoadDiagnostics;
+        if (diagnostics.Count == 0) return;
+
+        ErrorMessage = _documentService.CurrentLoadDiagnosticsSummary
+            ?? string.Join(" | ", diagnostics.Select(message => message.Message));
+    }
+
     public CommandManager CommandManager => _commandManager;
     public SelectionService SelectionService { get; } = new();
     public bool CanUndo => _commandManager.CanUndo;
@@ -246,6 +270,25 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         });
     }
 
+    /// <summary>
+    /// 用户块定义变更（元素定义页保存 / 导入 / 结构图变更）：解析器已经按
+    /// “变化定义 + 引用块”收敛了重解析范围，这里同步视图树并强制一帧预览。
+    /// 预览走既有的增量通道——签名未变的块由 HtmlPatch 原样保留，
+    /// 源码与编辑区光标都不受影响。
+    /// </summary>
+    private void OnActiveDocumentDefinitionsChanged(object? sender, EventArgs e)
+    {
+        RunOnUIThread(() =>
+        {
+            if (_isDisposed || _activeDocument is null) return;
+
+            _activeDocument.RefreshAst();
+            RaiseSourceAndTreeChanged();
+            ScheduleUpdatePreview(immediate: true);
+            TypeDefinitionsChanged?.Invoke();
+        });
+    }
+
     public Task OpenDocumentAsync(string filePath, CancellationToken ct = default) =>
         OpenDocumentAsync(filePath, loadStyle: true, ct);
 
@@ -269,6 +312,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
             {
                 OnPropertyChanged(nameof(CanUndo));
                 OnPropertyChanged(nameof(CanRedo));
+                ReportLoadDiagnostics();
             });
         }
         catch (Exception ex)
@@ -300,7 +344,18 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
     /// 从内存文本载入并附带伴随样式 XML 文本（浏览器端多文件选择配对通道）：
     /// styleXml 为 null 时按纯 Markdown 载入。无文件路径，保存时必须走另存。
     /// </summary>
-    public async Task OpenFromTextAsync(string markdown, string? styleXml, CancellationToken ct = default)
+    public Task OpenFromTextAsync(string markdown, string? styleXml, CancellationToken ct = default) =>
+        OpenFromTextAsync(markdown, styleXml, elementsXml: null, ct);
+
+    /// <summary>
+    /// 从内存文本载入并同时附带样式段与元素定义段（服务端文章通道）：
+    /// 定义段参与解析，决定自定义块是否按声明渲染。
+    /// </summary>
+    public async Task OpenFromTextAsync(
+        string markdown,
+        string? styleXml,
+        string? elementsXml,
+        CancellationToken ct = default)
     {
         try
         {
@@ -310,13 +365,14 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
                 ErrorMessage = null;
             });
 
-            await _documentService.OpenFromTextAsync(markdown, styleXml, ct).ConfigureAwait(false);
+            await _documentService.OpenFromTextAsync(markdown, styleXml, elementsXml, ct).ConfigureAwait(false);
             _commandManager.Clear();
 
             RunOnUIThread(() =>
             {
                 OnPropertyChanged(nameof(CanUndo));
                 OnPropertyChanged(nameof(CanRedo));
+                ReportLoadDiagnostics();
             });
         }
         catch (Exception ex)
@@ -384,6 +440,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
             {
                 OnPropertyChanged(nameof(IsModified));
                 OnPropertyChanged(nameof(HasFilePath));
+            OnPropertyChanged(nameof(CurrentFilePath));
             });
         }
         catch (Exception ex)
@@ -415,6 +472,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
             {
                 OnPropertyChanged(nameof(IsModified));
                 OnPropertyChanged(nameof(HasFilePath));
+            OnPropertyChanged(nameof(CurrentFilePath));
                 OnPropertyChanged(nameof(DocumentTitle));
             });
         }
@@ -706,6 +764,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
 
         ScheduleUpdatePreview();
         RaiseSourceAndTreeChanged();
+        TypeDefinitionsChanged?.Invoke();
     }
 
     public void Redo()
@@ -725,6 +784,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
 
         ScheduleUpdatePreview();
         RaiseSourceAndTreeChanged();
+        TypeDefinitionsChanged?.Invoke();
     }
 
     private void RaiseSourceAndTreeChanged()
@@ -865,8 +925,13 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
     private void ParseAndCommitInline(MarkdownDocument document)
     {
         var tree = _parser.ParseTree(
-            document.SourceMarkdown, document.Root, document.LastParsedSource);
+            document.SourceMarkdown,
+            document.Root,
+            document.LastParsedSource,
+            document.EffectiveUserBlockDefinitions);
         document.ReplaceParsedRoot(tree, document.SourceMarkdown, markChanged: false);
+        // 新树只带源码/派生值；显式声明的定义默认要在渲染前补进生效属性。
+        document.ApplyDeclaredAttributeDefaults();
     }
 
     private void RequestBackgroundParse(MarkdownDocument document)
@@ -876,12 +941,14 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         string source;
         string? previousSource;
         MarkdownNode previousRoot;
+        IReadOnlyList<UserBlockDefinition> userBlocks;
         lock (document)
         {
             // Root 与 LastParsedSource 必须在同一把锁内成对快照：二者描述同一棵已提交树。
             source = document.SourceMarkdown;
             previousRoot = document.Root;
             previousSource = document.LastParsedSource;
+            userBlocks = document.EffectiveUserBlockDefinitions;
         }
 
         // 单消费者串行链：同一时刻最多一个解析在跑，旧轮次提交时被版本号丢弃。
@@ -889,7 +956,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         lock (_parseChainLock)
         {
             round = _parseChain.ContinueWith(
-                _ => RunBackgroundParseRound(document, seq, source, previousSource, previousRoot),
+                _ => RunBackgroundParseRound(document, seq, source, previousSource, previousRoot, userBlocks),
                 CancellationToken.None,
                 TaskContinuationOptions.None,
                 TaskScheduler.Default).Unwrap();
@@ -902,12 +969,13 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         long seq,
         string source,
         string? previousSource,
-        MarkdownNode previousRoot)
+        MarkdownNode previousRoot,
+        IReadOnlyList<UserBlockDefinition> userBlocks)
     {
         try
         {
             // 纯函数解析：不触碰 document，可在后台线程安全执行。
-            var tree = _parser.ParseTree(source, previousRoot, previousSource);
+            var tree = _parser.ParseTree(source, previousRoot, previousSource, userBlocks);
 
             // 写文档只能在 UI 线程的 lock 内；Post + TCS 让保存屏障等到树已替换。
             var committed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -953,6 +1021,7 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
 
             // source 已由命令提交（修订号已计），这里只换树。
             document.ReplaceParsedRoot(tree, source, markChanged: false);
+            document.ApplyDeclaredAttributeDefaults();
             ActiveDocument!.RefreshAst();
             document.NormalizeEditorState();
 
@@ -1144,6 +1213,163 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         ApplyNodeAttribute(node, key, value);
 
     /// <summary>
+    /// “恢复默认”操作：删除面板写入的实例值，让源码值或定义默认值重新生效。
+    /// 与“显式设成默认值”（来源 Instance）不同，恢复后来源回到 DefinitionDefault。
+    /// </summary>
+    public void RestoreNodeAttributeDefault(MarkdownNode node, string key) =>
+        ApplyNodeAttribute(node, key, null);
+
+    /// <summary>类型级定义（样式/声明/行为）在撤销重做或切换文档后变化时触发。</summary>
+    public event Action? TypeDefinitionsChanged;
+
+    /// <summary>按节点类型查找类型样式定义；不存在返回 null。</summary>
+    public StyleDefinition? FindTypeStyle(NodeType type, string? kind)
+    {
+        var document = _activeDocument?.Document;
+        if (document is null) return null;
+
+        // kind 限定优先于同类型未限定定义，与渲染器 / StyleResolver 同一优先级。
+        var styles = document.StyleSheet.Styles;
+        StyleDefinition? fallback = null;
+        for (var i = 0; i < styles.Count; i++)
+        {
+            var definition = styles[i];
+            if (string.Equals(definition.Id, "default", StringComparison.Ordinal)
+                || definition.AppliesTo != type)
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(kind)
+                && string.Equals(definition.AppliesToKind, kind.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                return definition;
+            }
+
+            if (string.IsNullOrWhiteSpace(definition.AppliesToKind))
+            {
+                fallback ??= definition;
+            }
+        }
+
+        return fallback;
+    }
+
+    public StyleDefinition? FindTypeStyle(NodeType type)
+    {
+        var document = _activeDocument?.Document;
+        if (document is null) return null;
+
+        var styles = document.StyleSheet.Styles;
+        for (var i = 0; i < styles.Count; i++)
+        {
+            var definition = styles[i];
+            if (!string.Equals(definition.Id, "default", StringComparison.Ordinal)
+                && definition.AppliesTo == type)
+            {
+                return definition;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>写入类型级样式；首次写入时创建类型样式定义，可撤销。</summary>
+    public void ApplyTypeStyle(NodeType type, NodeStyle style) =>
+        CommitTypeDefinition(type, style, null, null);
+
+    /// <summary>写入类型级渲染行为（当前仅帧策略）。</summary>
+    public void ApplyTypeBehavior(NodeType type, ElementRenderBehavior behavior) =>
+        CommitTypeDefinition(type, null, behavior, null);
+
+    /// <summary>写入类型级属性声明表。</summary>
+    public void ApplyTypeAttributes(
+        NodeType type,
+        IReadOnlyList<ElementAttributeDeclaration> attributes) =>
+        CommitTypeDefinition(type, null, null, attributes);
+
+    /// <summary>
+    /// 用当前样式表渲染一段样例源码，供类型页预览。
+    /// 复用与正文一致的解析器与预览渲染器，保证结构/样式口径相同。
+    /// </summary>
+    public string RenderSampleHtml(string markdown)
+    {
+        if (_isDisposed || _activeDocument is null || string.IsNullOrWhiteSpace(markdown))
+        {
+            return string.Empty;
+        }
+
+        var document = _activeDocument.Document;
+        try
+        {
+            var sample = _parser.Parse(markdown).Document;
+            // 样例预览与正文预览走同一条口径：把当前文档的生效定义（已展开）挂到样例树上，
+            // 否则 applies-to 覆盖定义不参与模板选择，设计面永远只看到内置结构。
+            sample.ApplyUserBlockDefinitions(document.EffectiveUserBlockDefinitions);
+            sample.RestoreLoadedState(
+                markdown,
+                sample.Root,
+                document.StyleSheet,
+                sample.Metadata,
+                sample.EditorState,
+                id: null,
+                filePath: null);
+            // 共享当前样式表后补一次定义默认注入，样例预览与正文渲染口径一致。
+            sample.ApplyDeclaredAttributeDefaults();
+
+            var renderer = _rendererFactory.CreatePreview(sample);
+            return renderer.Render(sample).Html;
+        }
+        catch
+        {
+            // 样例源码由类型目录提供，渲染失败不应阻断编辑页。
+            return string.Empty;
+        }
+    }
+
+    private void CommitTypeDefinition(
+        NodeType type,
+        NodeStyle? style,
+        ElementRenderBehavior? behavior,
+        IReadOnlyList<ElementAttributeDeclaration>? attributes)
+    {
+        if (_isDisposed || _activeDocument is null) return;
+
+        var document = _activeDocument.Document;
+        lock (document)
+        {
+            var existing = FindTypeStyle(type);
+            var styleId = existing?.Id ?? $"type:{type}";
+            var oldState = ElementTypeDefinitionState.Capture(document.StyleSheet, existing?.Id);
+            var baseline = oldState ?? ElementTypeDefinitionState.Empty();
+            var newState = new ElementTypeDefinitionState(
+                style?.Clone() ?? baseline.Style.Clone(),
+                behavior?.Clone() ?? baseline.Behavior.Clone(),
+                attributes ?? baseline.Attributes);
+
+            if (ElementTypeDefinitionState.AreEqual(oldState, newState)) return;
+
+            var command = new ChangeTypeDefinitionCommand(
+                document,
+                styleId,
+                type,
+                $"类型 · {type}",
+                oldState,
+                newState);
+            _commandManager.Execute(command);
+        }
+
+        // 类型声明变化后要通知实例面板重建生成区；撤销/重做不经过这里，
+        // 由宿主在选中节点/文档变化时再刷新一次。
+        TypeDefinitionsChanged?.Invoke();
+
+        ScheduleUpdatePreview();
+        OnPropertyChanged(nameof(IsModified));
+        OnPropertyChanged(nameof(CanUndo));
+        OnPropertyChanged(nameof(CanRedo));
+    }
+
+    /// <summary>
     /// 块参数（如自定义图标）走属性命令栈：可撤销、立即重渲染预览。
     /// 与源码派生键不同，这类用户属性在重解析身份匹配时会被继承。
     /// </summary>
@@ -1158,9 +1384,23 @@ public sealed class EditorViewModel : INotifyPropertyChanged, IDisposable
         lock (document)
         {
             var target = document.FindNode(node.Id) ?? node;
-            var hadValue = target.Attributes.TryGetValue(key, out var oldValue);
-            if ((value is null && !hadValue) || (value is not null && string.Equals(oldValue, value, StringComparison.Ordinal)))
+            var hasValue = target.Attributes.TryGetValue(key, out var oldValue);
+            if (value is null)
+            {
+                // “恢复默认”：没有实例层条目可删时（本来就没设过）无需入栈。
+                if (!target.InstanceAttributes.ContainsKey(key))
+                {
+                    return;
+                }
+            }
+            else if (hasValue
+                     && string.Equals(oldValue, value, StringComparison.Ordinal)
+                     && target.GetAttributeSource(key) != AttributeValueSource.DefinitionDefault)
+            {
+                // 值没变且来源也不是定义默认：无事可做。定义默认 → 显式同值
+                // 必须放行，否则“显式设成默认值”和“从没设过”无法区分。
                 return;
+            }
 
             var command = new ChangeAttributeCommand(document, target, key, value);
             _commandManager.Execute(command);

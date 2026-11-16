@@ -28,6 +28,12 @@ public interface IFileService
     /// </summary>
     DocumentLoadResult LoadFromText(string markdown, string? styleXml);
 
+    /// <summary>
+    /// 从内存文本加载，并同时附带样式段与元素定义段（服务端文章通道）。
+    /// <paramref name="elementsXml"/> 为空/损坏时按可用定义解析，损坏只产生诊断。
+    /// </summary>
+    DocumentLoadResult LoadFromText(string markdown, string? styleXml, string? elementsXml);
+
     /// <summary>导出文档样式包 XML 文本（与 .md.styles.xml 同格式），无样式定制时仍返回完整包。</summary>
     string ExportStyleXml(MarkdownDocument document);
 

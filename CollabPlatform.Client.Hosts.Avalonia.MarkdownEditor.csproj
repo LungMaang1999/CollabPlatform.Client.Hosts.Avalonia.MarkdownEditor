@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <Folder Include="Application\Styling\" />
+    <EmbeddedResource Include="Infrastructure\Rendering\Html\builtin-elements.xml" />
   </ItemGroup>
 
   <!-- tests/ 目录存放独立测试工程源码，主工程不参与编译。 -->

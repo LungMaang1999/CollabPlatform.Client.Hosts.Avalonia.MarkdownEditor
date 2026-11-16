@@ -342,12 +342,28 @@ public sealed class NodeIdentityMatcher : INodeIdentityMatcher
 
         current.StyleId = prev.StyleId;
         current.LocalStyle = prev.LocalStyle.Clone();
+
+        // 实例层属于用户数据，必须整层迁移：即使某个键当前被源码值覆盖，
+        // 也要保留旧值，供“删除源码值后回落到实例值”使用。
         foreach (var attribute in prev.Attributes)
         {
-            // 解析器源码派生的属性（unclosed/language/href/index 等）以新树
-            // 为准，不继承；仅保留用户自定义属性。
             if (MarkdownAttributes.SourceDerivedKeys.Contains(attribute.Key)) continue;
-            current.Attributes.TryAdd(attribute.Key, attribute.Value);
+            if (prev.GetAttributeSource(attribute.Key) != AttributeValueSource.Instance) continue;
+            current.InstanceAttributes[attribute.Key] = attribute.Value;
+        }
+
+        foreach (var attribute in prev.InstanceAttributes)
+        {
+            if (MarkdownAttributes.SourceDerivedKeys.Contains(attribute.Key)) continue;
+            current.InstanceAttributes[attribute.Key] = attribute.Value;
+        }
+
+        // 按来源优先级合并：源码派生属性与新树源码值保持权威，
+        // 只有新树里是“定义默认”或缺席时，实例值才接管生效值。
+        var instanceLayer = new List<KeyValuePair<string, string>>(current.InstanceAttributes);
+        foreach (var attribute in instanceLayer)
+        {
+            current.SetInstanceAttribute(attribute.Key, attribute.Value);
         }
     }
 

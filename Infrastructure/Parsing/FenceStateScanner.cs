@@ -1,24 +1,32 @@
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Parsing;
 
 /// <summary>
-/// 扫描 Markdown 源码的围栏状态（``` 与 ~~~），定位文档末尾仍未闭合的
-/// 那个围栏块。流式输出时半截围栏会被 Markdig 当成到 EOF 为止的代码块，
-/// 前端却不应反复高亮/尝试渲染它，需要服务端给出未闭合标记。
+/// 扫描 Markdown 源码的围栏状态（```、~~~、''' 关键字围栏，以及注册过的 ':' 用户块围栏），
+/// 定位文档末尾仍未闭合的那个围栏块。流式输出时半截围栏会被 Markdig 当成到 EOF
+/// 为止的内容，前端却不应反复高亮/尝试渲染它，需要服务端给出未闭合标记。
 /// </summary>
 internal static class FenceStateScanner
 {
+    private readonly record struct OpenFence(
+        char FenceChar,
+        int FenceLength,
+        int StartLine,
+        bool AllowsNesting);
+
     /// <summary>
     /// 返回未闭合围栏的起始行号（1-based，与 SourceRange.StartLine 对齐）；
-    /// 全部围栏正常闭合时返回 null。
+    /// 全部围栏正常闭合时返回 null。嵌套时返回最内层未闭合围栏，
+    /// 外层用户块由 <see cref="UserBlock.Closed"/> 自行标记。
     /// </summary>
-    public static int? FindTrailingUnclosedFenceStartLine(string source)
+    public static int? FindTrailingUnclosedFenceStartLine(
+        string source,
+        UserBlockRegistry? userBlocks = null)
     {
         ArgumentNullException.ThrowIfNull(source);
 
-        var open = false;
-        var fenceChar = '\0';
-        var fenceLength = 0;
-        var openStartLine = 0;
+        // 栈式扫描：传统围栏内部一律视为内容（与 Markdig 代码围栏一致），
+        // 用户块内部才允许继续嵌套传统围栏或其他用户块。
+        var stack = new List<OpenFence>();
 
         var lineIndex = 0;
         var pos = 0;
@@ -38,19 +46,37 @@ internal static class FenceStateScanner
                 contentEnd--;
             }
 
-            if (open)
+            var allowOpen = true;
+            if (stack.Count > 0)
             {
-                if (IsClosingFence(source, pos, contentEnd, fenceChar, fenceLength))
+                var top = stack[^1];
+                if (IsClosingFence(source, pos, contentEnd, top.FenceChar, top.FenceLength))
                 {
-                    open = false;
+                    stack.RemoveAt(stack.Count - 1);
+                    allowOpen = false;
+                }
+                else if (!top.AllowsNesting)
+                {
+                    allowOpen = false;
                 }
             }
-            else if (TryOpenFence(source, pos, contentEnd, out var openedChar, out var openedLength))
+
+            if (allowOpen)
             {
-                open = true;
-                fenceChar = openedChar;
-                fenceLength = openedLength;
-                openStartLine = lineIndex + 1;
+                // 定义声明优先：代码围栏族命中定义时先按用户块处理，与生产管线一致；
+                // 未命中定义才落到内置围栏（含 math/mermaid/image/qr 与单引号族）。
+                if (TryOpenUserFence(
+                        source, pos, contentEnd, userBlocks,
+                        out var userFenceChar, out var userFenceLength))
+                {
+                    // 用户块内部允许继续嵌套传统围栏或其他用户块。
+                    stack.Add(new OpenFence(userFenceChar, userFenceLength, lineIndex + 1, AllowsNesting: true));
+                }
+                else if (TryOpenFence(source, pos, contentEnd, out var openedChar, out var openedLength))
+                {
+                    // 内置围栏（含内置单引号关键字围栏）内部一律视为内容，不再嵌套。
+                    stack.Add(new OpenFence(openedChar, openedLength, lineIndex + 1, AllowsNesting: false));
+                }
             }
 
             if (isLastLine)
@@ -62,7 +88,7 @@ internal static class FenceStateScanner
             lineIndex++;
         }
 
-        return open ? openStartLine : null;
+        return stack.Count > 0 ? stack[^1].StartLine : null;
     }
 
     private static bool TryOpenFence(
@@ -126,6 +152,67 @@ internal static class FenceStateScanner
         return true;
     }
 
+    /// <summary>
+    /// 注册表驱动的用户块开围栏识别：围栏长度达到定义下限且名称整词命中。
+    /// 冒号族与单引号族都由注册表判定，无定义时永不识别，保持旧行为。
+    /// </summary>
+    private static bool TryOpenUserFence(
+        string line,
+        int start,
+        int end,
+        UserBlockRegistry? userBlocks,
+        out char fenceChar,
+        out int fenceLength)
+    {
+        fenceChar = '\0';
+        fenceLength = 0;
+        if (userBlocks is null || userBlocks.IsEmpty)
+        {
+            return false;
+        }
+
+        var i = start;
+        var spaces = 0;
+        while (i < end && line[i] == ' ' && spaces < 3)
+        {
+            i++;
+            spaces++;
+        }
+
+        if (i >= end || !UserBlockRegistry.IsSupportedFenceChar(line[i]))
+        {
+            return false;
+        }
+
+        var candidateChar = line[i];
+        var fenceStart = i;
+        while (i < end && line[i] == candidateChar)
+        {
+            i++;
+        }
+
+        var length = i - fenceStart;
+        if (length < UserBlockRegistry.MinFenceLength)
+        {
+            return false;
+        }
+
+        var header = line.Substring(i, end - i).Trim();
+        if (header.Length == 0)
+        {
+            return false;
+        }
+
+        if (!userBlocks.TryResolve(header, length, candidateChar, out _, out _))
+        {
+            return false;
+        }
+
+        fenceChar = candidateChar;
+        fenceLength = length;
+        return true;
+    }
+
     private static bool IsClosingFence(
         string line,
         int start,
@@ -170,28 +257,10 @@ internal static class FenceStateScanner
         return true;
     }
 
-    private static readonly string[] CustomFenceKeywords =
-    {
-        "ancient-poetry", "ancient-poem",
-        "poetry", "poem", "verse",
-        "shi", "ci", "qu",
-        "image", "img", "timeline"
-    };
-
-    private static bool IsCustomFenceKeyword(string text)
-    {
-        foreach (var kw in CustomFenceKeywords)
-        {
-            if (text.StartsWith(kw, StringComparison.OrdinalIgnoreCase))
-            {
-                var next = kw.Length < text.Length ? text[kw.Length] : '\0';
-                if (next == '\0' || char.IsWhiteSpace(next))
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
+    /// <summary>
+    /// 内置单引号围栏关键字的识别直接查注册表，不再维护第二份字面量清单
+    /// （两份清单曾经缺 radar/spider，迟早对不上）。
+    /// </summary>
+    private static bool IsCustomFenceKeyword(string text) =>
+        FenceKeywordRegistry.BuiltIn.TryMatchPrefix(FenceFamily.PrimeFence, text, out _, out _);
 }

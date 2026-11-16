@@ -10,8 +10,25 @@ public sealed class HtmlRendererFactory : IDocumentRendererFactory
 {
     private static readonly AdmonitionIconOptions SharedIconOptions = new();
 
+    /// <summary>
+    /// 下发进程级图标配置。必须在首次渲染之前一次性完成：渲染器按渲染开始时的
+    /// 快照生成签名与字形，中途变更会让缓存纪元失效并触发一帧全量重绘。
+    /// </summary>
     public static void ConfigureIcons(IReadOnlyDictionary<string, string> icons) =>
         SharedIconOptions.Configure(icons);
+
+    /// <summary>
+    /// 只下发自定义内容块（按 kind 寻址）的图标，不影响提示块字形。
+    /// 与 <see cref="ConfigureIcons"/> 共用同一份不可变快照。
+    /// </summary>
+    public static void ConfigureCustomBlockIcons(IReadOnlyDictionary<string, string> icons) =>
+        SharedIconOptions.ConfigureCustomBlockIcons(icons);
+
+    /// <summary>捕获进程级图标配置，供调用方在 finally 中还原。</summary>
+    public static AdmonitionIconState CaptureIcons() => SharedIconOptions.Capture();
+
+    /// <summary>还原进程级图标配置（字形表与修订号）。</summary>
+    public static void RestoreIcons(AdmonitionIconState state) => SharedIconOptions.Restore(state);
 
     public IDocumentRenderer Create(MarkdownDocument document)
     {

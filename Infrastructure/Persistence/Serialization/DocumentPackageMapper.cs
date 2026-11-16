@@ -48,14 +48,76 @@ internal static class DocumentPackageMapper
         {
             foreach (var sd in document.StyleSheet.Styles)
             {
-                dto.Document.Styles.Add(new StyleDefinitionDto
+                var styleDto = new StyleDefinitionDto
                 {
                     Id = sd.Id,
                     Name = sd.Name,
                     ParentStyleId = sd.ParentStyleId,
                     AppliesTo = sd.AppliesTo?.ToString(),
-                    Style = ToNodeStyleDto(sd.Style)
-                });
+                    AppliesToKind = sd.AppliesToKind,
+                    Style = ToNodeStyleDto(sd.Style),
+                    Behavior = new ElementRenderBehaviorDto
+                    {
+                        FrameStrategy = sd.Behavior?.FrameStrategy.ToString() ?? nameof(ElementFrameStrategy.Auto),
+                        TemplateVariant = sd.Behavior?.TemplateVariant.ToString()
+                            ?? nameof(ElementTemplateVariant.Default),
+                    }
+                };
+
+                // 属性声明只属于类型定义；命名样式即便被手动塞入声明也不落盘。
+                if (sd.AppliesTo.HasValue)
+                {
+                    foreach (var attribute in sd.Attributes)
+                    {
+                        var attributeDto = new ElementAttributeDeclarationDto
+                        {
+                            Key = attribute.Key,
+                            Label = attribute.Label,
+                            ValueKind = attribute.ValueKind.ToString(),
+                            DefaultValue = attribute.DefaultValue,
+                            Hint = attribute.Hint,
+                            IsEnabled = attribute.IsEnabled,
+                            Target = attribute.Target.ToString(),
+                            IsDerived = attribute.IsDerived,
+                            Group = attribute.Group,
+                            BindingTarget = attribute.Binding?.Target.ToString(),
+                            BindingName = attribute.Binding?.Name,
+                            BindingPart = attribute.Binding?.Part,
+                            BindingValueMap = attribute.Binding?.ValueMap,
+                            Presentation = attribute.Presentation.IsDefault
+                                ? null
+                                : new ElementAttributePresentationDto
+                                {
+                                    Control = attribute.Presentation.Control.ToString(),
+                                    Placeholder = attribute.Presentation.Placeholder,
+                                    Unit = attribute.Presentation.Unit,
+                                    Width = attribute.Presentation.Width.ToString(),
+                                    Order = attribute.Presentation.Order,
+                                    IsAdvanced = attribute.Presentation.IsAdvanced,
+                                    Min = attribute.Presentation.Min,
+                                    Max = attribute.Presentation.Max,
+                                    Step = attribute.Presentation.Step,
+                                    Precision = attribute.Presentation.Precision,
+                                    Rows = attribute.Presentation.Rows,
+                                    MaxLength = attribute.Presentation.MaxLength,
+                                    Pattern = attribute.Presentation.Pattern,
+                                    VisibleWhen = attribute.Presentation.VisibleWhen
+                                        .Select(condition => new ElementAttributeVisibilityConditionDto
+                                        {
+                                            Key = condition.Key,
+                                            Operator = condition.Operator.ToString(),
+                                            Value = condition.Value,
+                                            RawOperator = condition.UnknownOperator
+                                        })
+                                        .ToList()
+                                }
+                        };
+                        attributeDto.Options.AddRange(attribute.Options);
+                        styleDto.Attributes.Add(attributeDto);
+                    }
+                }
+
+                dto.Document.Styles.Add(styleDto);
             }
         }
 
@@ -99,11 +161,36 @@ internal static class DocumentPackageMapper
             if (node.Attributes is not null)
             {
                 // 源码派生属性（language/href/index 等）重解析时自动生成，
-                // 不需要持久化；仅保留用户自定义属性供身份匹配还原。
+                // 不需要持久化；定义默认值由定义重新注入，也不落盘（否则改默认值
+                // 时旧默认会被当成用户实例值继承回来）。其余属性连来源一起写。
                 foreach (var kv in node.Attributes)
                 {
-                    if (!MarkdownAttributes.SourceDerivedKeys.Contains(kv.Key))
-                        dto.Attributes[kv.Key] = kv.Value;
+                    if (MarkdownAttributes.SourceDerivedKeys.Contains(kv.Key))
+                        continue;
+
+                    var source = node.GetAttributeSource(kv.Key);
+                    if (source == AttributeValueSource.DefinitionDefault)
+                        continue;
+
+                    dto.Attributes[kv.Key] = kv.Value;
+                    if (source != AttributeValueSource.Instance)
+                        dto.AttributeSources[kv.Key] = source.ToString();
+                }
+
+                // 被源码覆盖的实例回退值：只存“与有效值不同”或来源是 Source 的条目。
+                foreach (var kv in node.InstanceAttributes)
+                {
+                    if (MarkdownAttributes.SourceDerivedKeys.Contains(kv.Key))
+                        continue;
+
+                    if (node.GetAttributeSource(kv.Key) == AttributeValueSource.Instance
+                        && node.Attributes.TryGetValue(kv.Key, out var effective)
+                        && string.Equals(effective, kv.Value, StringComparison.Ordinal))
+                    {
+                        continue; // 有效值就是它，已在 Attributes 里
+                    }
+
+                    dto.InstanceAttributes[kv.Key] = kv.Value;
                 }
             }
 
@@ -130,12 +217,14 @@ internal static class DocumentPackageMapper
         {
             foreach (var key in node.Attributes.Keys)
             {
+                // 定义默认值也算“带签名”：保留 Text/RawMarkdown 让身份匹配更稳，
+                // 默认值本身不落盘（解析时按定义重新注入）。
                 if (!MarkdownAttributes.SourceDerivedKeys.Contains(key))
                     return true;
             }
         }
 
-        return false;
+        return node.InstanceAttributes.Count > 0;
     }
 
     private static bool NodeStyleHasData(NodeStyle? style)
@@ -255,8 +344,61 @@ internal static class DocumentPackageMapper
                     Name = sd.Name,
                     ParentStyleId = sd.ParentStyleId,
                     AppliesTo = TryParseNodeType(sd.AppliesTo),
+                    AppliesToKind = string.IsNullOrWhiteSpace(sd.AppliesToKind) ? null : sd.AppliesToKind,
                     Style = ToNodeStyleDomain(sd.Style)
                 };
+
+                def.Behavior.FrameStrategy =
+                    Enum.TryParse<ElementFrameStrategy>(sd.Behavior?.FrameStrategy, ignoreCase: true, out var frameStrategy)
+                        ? frameStrategy
+                        : ElementFrameStrategy.Auto;
+
+                def.Behavior.TemplateVariant =
+                    Enum.TryParse<ElementTemplateVariant>(sd.Behavior?.TemplateVariant, ignoreCase: true, out var templateVariant)
+                        ? templateVariant
+                        : ElementTemplateVariant.Default;
+
+                if (def.AppliesTo.HasValue)
+                {
+                    foreach (var attributeDto in sd.Attributes)
+                    {
+                        var attribute = new ElementAttributeDeclaration
+                        {
+                            Key = attributeDto.Key,
+                            Label = attributeDto.Label,
+                            ValueKind = Enum.TryParse<ElementAttributeValueKind>(
+                                attributeDto.ValueKind, ignoreCase: true, out var valueKind)
+                                ? valueKind
+                                : ElementAttributeValueKind.Text,
+                            DefaultValue = attributeDto.DefaultValue,
+                            Hint = attributeDto.Hint,
+                            IsEnabled = attributeDto.IsEnabled,
+                            Target = Enum.TryParse<ElementAttributeTarget>(
+                                attributeDto.Target, ignoreCase: true, out var target)
+                                ? target
+                                : ElementAttributeTarget.DocumentAttribute,
+                            IsDerived = attributeDto.IsDerived,
+                            Group = attributeDto.Group,
+                            Binding = string.IsNullOrWhiteSpace(attributeDto.BindingTarget)
+                                || string.IsNullOrWhiteSpace(attributeDto.BindingName)
+                                ? null
+                                : new ElementAttributeRenderBinding
+                                {
+                                    Target = Enum.TryParse<ElementAttributeBindingTarget>(
+                                        attributeDto.BindingTarget, ignoreCase: true, out var bindingTarget)
+                                        ? bindingTarget
+                                        : ElementAttributeBindingTarget.CssVar,
+                                    Name = attributeDto.BindingName,
+                                    Part = attributeDto.BindingPart,
+                                    ValueMap = attributeDto.BindingValueMap
+                                },
+                            Presentation = ToPresentation(attributeDto.Presentation)
+                        };
+                        attribute.Options.AddRange(attributeDto.Options);
+                        def.Attributes.Add(attribute);
+                    }
+                }
+
                 styleSheet.Styles.Add(def);
             }
         }
@@ -335,9 +477,30 @@ internal static class DocumentPackageMapper
             };
 
             node.Attributes.Clear();
+            node.AttributeSources.Clear();
+            node.InstanceAttributes.Clear();
             if (dto.Attributes is not null)
             {
                 foreach (var kv in dto.Attributes) node.Attributes[kv.Key] = kv.Value;
+            }
+
+            // 旧包没有来源信息：按 Instance 处理（历史行为即“用户属性”）。
+            if (dto.AttributeSources is not null)
+            {
+                foreach (var kv in dto.AttributeSources)
+                {
+                    if (node.Attributes.ContainsKey(kv.Key)
+                        && Enum.TryParse<AttributeValueSource>(kv.Value, ignoreCase: true, out var source))
+                    {
+                        node.AttributeSources[kv.Key] = source;
+                    }
+                }
+            }
+
+            if (dto.InstanceAttributes is not null)
+            {
+                foreach (var kv in dto.InstanceAttributes)
+                    node.InstanceAttributes[kv.Key] = kv.Value;
             }
 
             if (dto.Children is not null)
@@ -370,6 +533,51 @@ internal static class DocumentPackageMapper
         {
             if (string.IsNullOrWhiteSpace(s)) return null;
             return Enum.TryParse<NodeCategory>(s, out var v) ? v : null;
+        }
+
+        static ElementAttributePresentation ToPresentation(ElementAttributePresentationDto? dto)
+        {
+            var presentation = new ElementAttributePresentation();
+            if (dto is null)
+            {
+                return presentation;
+            }
+
+            presentation.Control = Enum.TryParse<ElementAttributeControlKind>(
+                dto.Control, ignoreCase: true, out var control)
+                ? control
+                : ElementAttributeControlKind.Auto;
+            presentation.Width = Enum.TryParse<ElementAttributeFieldWidth>(
+                dto.Width, ignoreCase: true, out var width)
+                ? width
+                : ElementAttributeFieldWidth.Auto;
+            presentation.Placeholder = dto.Placeholder ?? string.Empty;
+            presentation.Unit = dto.Unit ?? string.Empty;
+            presentation.Order = dto.Order;
+            presentation.IsAdvanced = dto.IsAdvanced;
+            presentation.Min = dto.Min;
+            presentation.Max = dto.Max;
+            presentation.Step = dto.Step;
+            presentation.Precision = dto.Precision;
+            presentation.Rows = dto.Rows;
+            presentation.MaxLength = dto.MaxLength;
+            presentation.Pattern = dto.Pattern ?? string.Empty;
+
+            foreach (var conditionDto in dto.VisibleWhen)
+            {
+                var known = Enum.TryParse<ElementAttributeConditionOperator>(
+                    conditionDto.Operator, ignoreCase: true, out var conditionOperator);
+                presentation.VisibleWhen.Add(new ElementAttributeVisibilityCondition
+                {
+                    Key = conditionDto.Key ?? string.Empty,
+                    Operator = known ? conditionOperator : ElementAttributeConditionOperator.Equals,
+                    UnknownOperator = conditionDto.RawOperator
+                        ?? (known ? null : conditionDto.Operator),
+                    Value = conditionDto.Value ?? string.Empty
+                });
+            }
+
+            return presentation;
         }
     }
 }

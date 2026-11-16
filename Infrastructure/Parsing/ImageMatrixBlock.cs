@@ -3,7 +3,7 @@ using Markdig.Syntax;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Parsing;
 
-public sealed class ImageMatrixBlock : LeafBlock
+public sealed class ImageMatrixBlock : LeafBlock, IFencedBlock
 {
     public ImageMatrixBlock(BlockParser parser) : base(parser)
     {

@@ -1,3 +1,4 @@
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Diagnostics;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Documents;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Documents;
 
@@ -11,6 +12,7 @@ public sealed class DocumentService : IDocumentService, IDisposable
     private MarkdownDocument? _currentDocument;
     private DocumentFileSnapshot? _currentSnapshot;
     private string? _currentFilePath;
+    private IReadOnlyList<DiagnosticMessage> _currentLoadDiagnostics = [];
 
     public event EventHandler<MarkdownDocument?>? CurrentDocumentChanged;
     public event EventHandler<bool>? HasUnsavedChangesChanged;
@@ -23,6 +25,9 @@ public sealed class DocumentService : IDocumentService, IDisposable
     public MarkdownDocument? CurrentDocument => _currentDocument;
     public string? CurrentFilePath => _currentFilePath;
     public bool HasUnsavedChanges => _currentDocument?.IsModified == true;
+    public IReadOnlyList<DiagnosticMessage> CurrentLoadDiagnostics => _currentLoadDiagnostics;
+
+    public string? CurrentLoadDiagnosticsSummary => DiagnosticSummary.Compose(_currentLoadDiagnostics);
 
     public string GetStyleFilePath(string markdownFilePath) =>
         _fileService.GetStyleFilePath(markdownFilePath);
@@ -38,6 +43,7 @@ public sealed class DocumentService : IDocumentService, IDisposable
             _currentDocument = new MarkdownDocument { FilePath = string.Empty };
             _currentSnapshot = null;
             _currentFilePath = null;
+            _currentLoadDiagnostics = [];
 
             CurrentDocumentChanged?.Invoke(this, _currentDocument);
             HasUnsavedChangesChanged?.Invoke(this, HasUnsavedChanges);
@@ -65,6 +71,7 @@ public sealed class DocumentService : IDocumentService, IDisposable
             _currentDocument = loadResult.Document;
             _currentSnapshot = loadResult.Snapshot;
             _currentFilePath = fullPath;
+            _currentLoadDiagnostics = loadResult.Diagnostics;
 
             _currentDocument.FilePath = fullPath;
             _currentDocument.MarkSaved();
@@ -90,17 +97,31 @@ public sealed class DocumentService : IDocumentService, IDisposable
     /// 从内存文本载入并附带伴随样式 XML（浏览器多文件选择配对通道）：
     /// 文档无文件路径、无快照。
     /// </summary>
-    public async Task<MarkdownDocument> OpenFromTextAsync(string markdown, string? styleXml, CancellationToken cancellationToken = default)
+    public Task<MarkdownDocument> OpenFromTextAsync(string markdown, string? styleXml, CancellationToken cancellationToken = default) =>
+        OpenFromTextAsync(markdown, styleXml, elementsXml: null, cancellationToken);
+
+    /// <summary>
+    /// 从内存文本载入并同时附带样式段与元素定义段（服务端文章通道）：
+    /// 文档无文件路径、无快照。
+    /// </summary>
+    public async Task<MarkdownDocument> OpenFromTextAsync(
+        string markdown,
+        string? styleXml,
+        string? elementsXml,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(markdown);
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var loadResult = await Task.Run(() => _fileService.LoadFromText(markdown, styleXml), cancellationToken).ConfigureAwait(false);
+            var loadResult = await Task.Run(
+                () => _fileService.LoadFromText(markdown, styleXml, elementsXml),
+                cancellationToken).ConfigureAwait(false);
             _currentDocument = loadResult.Document;
             _currentSnapshot = null;
             _currentFilePath = null;
+            _currentLoadDiagnostics = loadResult.Diagnostics;
 
             CurrentDocumentChanged?.Invoke(this, _currentDocument);
             HasUnsavedChangesChanged?.Invoke(this, HasUnsavedChanges);

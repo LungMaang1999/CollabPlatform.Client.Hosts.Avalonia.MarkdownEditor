@@ -34,6 +34,7 @@ public static class MarkdownEditorServiceCollectionExtensions
 
         services.AddSingleton<IMarkdownParser, MarkdownParser>();
         services.AddSingleton<IDocumentSerializer, DocumentSerializer>();
+        services.AddSingleton<ICompanionDocumentStore, FileCompanionDocumentStore>();
         services.AddSingleton<IFileService, FileService>();
         services.AddSingleton<IDocumentService, DocumentService>();
 

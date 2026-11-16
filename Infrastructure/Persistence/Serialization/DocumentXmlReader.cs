@@ -3,6 +3,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Xml.Linq;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Styling;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Schema;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Persistence.Serialization;
@@ -114,13 +115,83 @@ internal static class DocumentXmlReader
                     Id = sEl.Attribute("Id")?.Value ?? string.Empty,
                     Name = sEl.Attribute("Name")?.Value ?? string.Empty,
                     ParentStyleId = AttrOrElement(sEl, nsX, "ParentStyleId"),
-                    AppliesTo = AttrOrElement(sEl, nsX, "AppliesTo")
+                    AppliesTo = AttrOrElement(sEl, nsX, "AppliesTo"),
+                    AppliesToKind = AttrOrElement(sEl, nsX, "AppliesToKind")
                 };
 
                 var valueEl = sEl.Element(nsX + "StyleValue");
                 if (valueEl is not null)
                 {
                     s.Style = ReadStyleDto(valueEl, nsX);
+                }
+
+                var attributesEl = sEl.Element(nsX + "ElementAttributes");
+                if (attributesEl is not null)
+                {
+                    foreach (var attributeEl in attributesEl.Elements(nsX + "ElementAttribute"))
+                    {
+                        var attribute = new ElementAttributeDeclarationDto
+                        {
+                            Key = attributeEl.Attribute("Key")?.Value ?? string.Empty,
+                            Label = attributeEl.Attribute("Label")?.Value ?? string.Empty,
+                            ValueKind = attributeEl.Attribute("Kind")?.Value ?? "Text",
+                            DefaultValue = DocumentXmlWriter.DecodeValue(
+                                attributeEl.Attribute("Default")?.Value),
+                            Hint = DocumentXmlWriter.DecodeValue(
+                                attributeEl.Attribute("Hint")?.Value) ?? string.Empty,
+                            IsEnabled = !string.Equals(
+                                attributeEl.Attribute("Enabled")?.Value, "0", StringComparison.Ordinal),
+                            Target = attributeEl.Attribute("Target")?.Value ?? "DocumentAttribute",
+                            IsDerived = string.Equals(
+                                attributeEl.Attribute("Derived")?.Value, "1", StringComparison.Ordinal),
+                            Group = DocumentXmlWriter.DecodeValue(
+                                attributeEl.Attribute("Group")?.Value) ?? string.Empty
+                        };
+
+                        var optionsEl = attributeEl.Element(nsX + "Options");
+                        if (optionsEl is not null)
+                        {
+                            foreach (var optionEl in optionsEl.Elements(nsX + "Option"))
+                            {
+                                var option = DocumentXmlWriter.DecodeValue(
+                                    optionEl.Attribute("Value")?.Value);
+                                if (!string.IsNullOrEmpty(option))
+                                {
+                                    attribute.Options.Add(option);
+                                }
+                            }
+                        }
+
+                        var bindingEl = attributeEl.Element(nsX + "Binding");
+                        if (bindingEl is not null)
+                        {
+                            attribute.BindingTarget = bindingEl.Attribute("Target")?.Value ?? "CssVar";
+                            attribute.BindingName = DocumentXmlWriter.DecodeValue(
+                                bindingEl.Attribute("Name")?.Value);
+                            attribute.BindingPart = DocumentXmlWriter.DecodeValue(
+                                bindingEl.Attribute("Part")?.Value);
+                            attribute.BindingValueMap = DocumentXmlWriter.DecodeValue(
+                                bindingEl.Attribute("ValueMap")?.Value);
+                        }
+
+                        var presentationEl = attributeEl.Element(nsX + "Presentation");
+                        if (presentationEl is not null)
+                        {
+                            attribute.Presentation = ReadPresentation(presentationEl, nsX);
+                        }
+
+                        s.Attributes.Add(attribute);
+                    }
+                }
+
+                var behaviorEl = sEl.Element(nsX + "Behavior");
+                if (behaviorEl is not null)
+                {
+                    s.Behavior = new ElementRenderBehaviorDto
+                    {
+                        FrameStrategy = behaviorEl.Attribute("FrameStrategy")?.Value ?? "Auto",
+                        TemplateVariant = behaviorEl.Attribute("TemplateVariant")?.Value ?? "Default",
+                    };
                 }
 
                 docDto.Styles.Add(s);
@@ -216,6 +287,8 @@ internal static class DocumentXmlReader
             }
 
             node.Attributes.Clear();
+            node.AttributeSources.Clear();
+            node.InstanceAttributes.Clear();
             var attrs = el.Element(nsLocal + "Attributes");
             if (attrs is not null)
             {
@@ -223,7 +296,23 @@ internal static class DocumentXmlReader
                 {
                     var key = a.Attribute("Key")?.Value ?? string.Empty;
                     var val = DocumentXmlWriter.DecodeValue(a.Attribute("Value")?.Value);
-                    if (!string.IsNullOrEmpty(key)) node.Attributes[key] = val;
+                    if (string.IsNullOrEmpty(key)) continue;
+
+                    node.Attributes[key] = val;
+                    var source = a.Attribute("Source")?.Value;
+                    if (!string.IsNullOrEmpty(source)) node.AttributeSources[key] = source;
+                }
+            }
+
+            // 被源码覆盖的实例回退值；旧包没有这个节点，等价于空层。
+            var instanceAttrs = el.Element(nsLocal + "InstanceAttributes");
+            if (instanceAttrs is not null)
+            {
+                foreach (var a in instanceAttrs.Elements(nsLocal + "Attribute"))
+                {
+                    var key = a.Attribute("Key")?.Value ?? string.Empty;
+                    var val = DocumentXmlWriter.DecodeValue(a.Attribute("Value")?.Value);
+                    if (!string.IsNullOrEmpty(key)) node.InstanceAttributes[key] = val;
                 }
             }
 
@@ -235,6 +324,64 @@ internal static class DocumentXmlReader
             }
 
             return node;
+        }
+
+        // 呈现设置：缺节点/缺字段都等价于默认值，未知枚举回落 Auto；
+        // 未知运算符保留原文并让条件恒不成立，避免读一次就改写用户手写内容。
+        ElementAttributePresentationDto ReadPresentation(XElement el, XNamespace nsLocal)
+        {
+            var dto = new ElementAttributePresentationDto
+            {
+                Control = el.Attribute("Control")?.Value
+                    ?? nameof(ElementAttributeControlKind.Auto),
+                Width = el.Attribute("Width")?.Value
+                    ?? nameof(ElementAttributeFieldWidth.Auto),
+                Placeholder = DocumentXmlWriter.DecodeValue(el.Attribute("Placeholder")?.Value),
+                Unit = DocumentXmlWriter.DecodeValue(el.Attribute("Unit")?.Value),
+                Order = TryParseInt(el.Attribute("Order")?.Value),
+                IsAdvanced = string.Equals(
+                    el.Attribute("Advanced")?.Value, "true", StringComparison.Ordinal),
+                Min = TryParseDouble(el.Attribute("Min")?.Value),
+                Max = TryParseDouble(el.Attribute("Max")?.Value),
+                Step = TryParseDouble(el.Attribute("Step")?.Value),
+                Precision = TryParseInt(el.Attribute("Precision")?.Value),
+                Rows = TryParseInt(el.Attribute("Rows")?.Value),
+                MaxLength = TryParseInt(el.Attribute("MaxLength")?.Value),
+                Pattern = DocumentXmlWriter.DecodeValue(el.Attribute("Pattern")?.Value)
+            };
+
+            foreach (var conditionEl in el.Elements(nsLocal + "VisibleWhen"))
+            {
+                var rawOperator = conditionEl.Attribute("Operator")?.Value
+                    ?? nameof(ElementAttributeConditionOperator.Equals);
+
+                if (Enum.TryParse<ElementAttributeConditionOperator>(
+                        rawOperator, ignoreCase: true, out var parsed))
+                {
+                    dto.VisibleWhen.Add(new ElementAttributeVisibilityConditionDto
+                    {
+                        Key = DocumentXmlWriter.DecodeValue(conditionEl.Attribute("Key")?.Value)
+                            ?? string.Empty,
+                        Operator = parsed.ToString(),
+                        Value = DocumentXmlWriter.DecodeValue(conditionEl.Attribute("Value")?.Value)
+                            ?? string.Empty
+                    });
+                }
+                else
+                {
+                    dto.VisibleWhen.Add(new ElementAttributeVisibilityConditionDto
+                    {
+                        Key = DocumentXmlWriter.DecodeValue(conditionEl.Attribute("Key")?.Value)
+                            ?? string.Empty,
+                        Operator = nameof(ElementAttributeConditionOperator.Equals),
+                        Value = DocumentXmlWriter.DecodeValue(conditionEl.Attribute("Value")?.Value)
+                            ?? string.Empty,
+                        RawOperator = rawOperator
+                    });
+                }
+            }
+
+            return dto;
         }
     }
 

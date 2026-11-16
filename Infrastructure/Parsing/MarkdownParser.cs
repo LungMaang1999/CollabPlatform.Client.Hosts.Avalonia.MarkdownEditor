@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Text;
 using System.Text.RegularExpressions;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Diagnostics;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Parsing;
@@ -5,7 +7,10 @@ using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Documents;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax.Factories;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax.Matching;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Persistence.Serialization;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Rendering.Html;
 using Markdig;
+using Markdig.Parsers;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Parsing;
 
@@ -15,20 +20,118 @@ public sealed class MarkdownParser : IMarkdownParser
     private readonly NodeFactory _nodeFactory;
     private readonly SectionBuilder _sectionBuilder;
     private readonly INodeIdentityMatcher _identityMatcher;
-    private readonly MarkdigToNodeConverter _converter;
-    private readonly MarkdownPipeline _pipeline;
+
+    // 内置数据面的解析声明（item-marker 等）。缺省取嵌入 builtin-elements.xml；
+    // 显式传入只用于测试模拟“改了内置 XML”后的解析结果变化。
+    private readonly IReadOnlyList<UserBlockDefinition> _builtInDeclarations;
+
+    // 解析运行时按用户块定义集合缓存：管线与转换器都绑定一份注册表，
+    // 同一文档的每次编辑复用同一运行时，定义变化只换一个缓存键。
+    private readonly ConcurrentDictionary<string, ParseRuntime> _runtimes = new(StringComparer.Ordinal);
 
     public MarkdownParser(
         MarkdownParserOptions options,
         NodeFactory? nodeFactory = null,
         SectionBuilder? sectionBuilder = null,
-        INodeIdentityMatcher? identityMatcher = null)
+        INodeIdentityMatcher? identityMatcher = null,
+        IReadOnlyList<UserBlockDefinition>? builtInDeclarations = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _nodeFactory = nodeFactory ?? new NodeFactory();
         _sectionBuilder = sectionBuilder ?? new SectionBuilder(_nodeFactory);
         _identityMatcher = identityMatcher ?? new NodeIdentityMatcher();
+        _builtInDeclarations = builtInDeclarations ?? BuiltInElementDefinitions.Load();
 
+        // 配置里的用户块在构造期校验；无定义时不注册解析器，保持旧管线逐字节一致。
+        GetRuntime(_options.UserBlocks);
+    }
+
+    /// <summary>一份用户块定义对应的管线/转换器/注册表，创建后只读。</summary>
+    private sealed class ParseRuntime
+    {
+        public ParseRuntime(
+            MarkdownPipeline pipeline,
+            MarkdigToNodeConverter converter,
+            UserBlockRegistry registry,
+            IReadOnlyList<UserBlockDefinition> allDefinitions)
+        {
+            Pipeline = pipeline;
+            Converter = converter;
+            Registry = registry;
+            AllDefinitions = allDefinitions;
+        }
+
+        public MarkdownPipeline Pipeline { get; }
+
+        public MarkdigToNodeConverter Converter { get; }
+
+        public UserBlockRegistry Registry { get; }
+
+        /// <summary>
+        /// 传入本次运行时的完整定义，含只重写内置类型结构、不参与围栏竞争的
+        /// <c>applies-to</c> 定义。<see cref="Registry"/> 只保留围栏定义，不能用于回写文档。
+        /// </summary>
+        public IReadOnlyList<UserBlockDefinition> AllDefinitions { get; }
+    }
+
+    private ParseRuntime GetRuntime(IReadOnlyList<UserBlockDefinition>? userBlocks)
+    {
+        var definitions = userBlocks ?? _options.UserBlocks;
+        var key = ComputeRuntimeKey(definitions);
+        return _runtimes.GetOrAdd(key, _ => CreateRuntime(definitions));
+    }
+
+    /// <summary>
+    /// 运行时缓存键 = 语法指纹 + 结构指纹。语法指纹按设计只折叠影响解析产物的
+    /// 字段（围栏/属性/内容模型），不含 <see cref="UserBlockPart"/> 结构；而运行时
+    /// 携带完整定义并会被写回文档，渲染侧从文档定义读结构。只追加结构维度，
+    /// 不改 <see cref="UserBlockSyntaxFingerprint"/> 的既有语义。
+    /// </summary>
+    internal static string ComputeRuntimeKey(IReadOnlyList<UserBlockDefinition>? definitions)
+    {
+        var syntax = UserBlockSyntaxFingerprint.ComputeSet(definitions);
+        if (definitions is null || definitions.Count == 0)
+        {
+            return syntax;
+        }
+
+        var builder = new StringBuilder(syntax.Length + definitions.Count * 96);
+        builder.Append(syntax).Append("|structure[");
+
+        // 与语法指纹一致：书写顺序不影响运行时，按 Id 排序后折叠。
+        foreach (var definition in definitions.OrderBy(item => item.Id, StringComparer.Ordinal))
+        {
+            var structure = UserBlockStructureRules.Describe(definition.Structure);
+            builder.Append(definition.Id.Length).Append(':').Append(definition.Id)
+                .Append('=').Append(structure.Length).Append(':').Append(structure).Append(';');
+        }
+
+        builder.Append(']');
+
+        // 关键字集合单独进缓存键：定义改了名称/围栏族但语法指纹恰好没换维度时，
+        // 旧运行时会带着旧的“可识别围栏集合”继续命中，属于静默出错。
+        // 这里按族显式折叠 (围栏字符, 名称/别名)，定义关键字变化必然换运行时。
+        builder.Append("|keywords[");
+        foreach (var definition in definitions.OrderBy(item => item.Id, StringComparer.Ordinal))
+        {
+            // 多字符定义要逐个字符折叠，任一围栏字符变化都必须换运行时；
+            // 别名同样进缓存键，否则改了别名仍会命中旧运行时。
+            foreach (var fenceChar in definition.EffectiveFenceChars.OrderBy(item => item))
+            {
+                foreach (var keyword in definition.EffectiveKeywords)
+                {
+                    builder.Append(fenceChar).Append(':')
+                        .Append(keyword.Length).Append(':').Append(keyword).Append(';');
+                }
+            }
+        }
+
+        builder.Append(']');
+        return builder.ToString();
+    }
+
+    private ParseRuntime CreateRuntime(IReadOnlyList<UserBlockDefinition> definitions)
+    {
         var pipelineBuilder = new MarkdownPipelineBuilder();
         if (_options.EnablePipeTables) pipelineBuilder.UsePipeTables();
         if (_options.EnableTaskLists) pipelineBuilder.UseTaskLists();
@@ -39,34 +142,262 @@ public sealed class MarkdownParser : IMarkdownParser
         if (_options.EnableMathematics)
         {
             pipelineBuilder.UseMathematics();
-
-            pipelineBuilder.InlineParsers.Insert(0, new LatexInlineMathParser());
             pipelineBuilder.BlockParsers.Insert(0, new LatexBlockMathParser());
         }
 
-        pipelineBuilder.BlockParsers.Insert(0, new ImageMatrixFenceParser());
-        pipelineBuilder.BlockParsers.Insert(0, new PoemFenceParser());
-        pipelineBuilder.BlockParsers.Insert(0, new TimelineFenceParser());
-        pipelineBuilder.BlockParsers.Insert(0, new RadarFenceParser());
+        // 行内 parser（行内公式 / 代码段）只有这一个注册入口，与影子管线共用，次序一致。
+        InlineParserRegistration.Apply(pipelineBuilder, _options);
 
-        _pipeline = pipelineBuilder.Build();
+        // 解析声明的唯一装载路径：内置数据面（builtin-elements.xml）与文档定义先合并，
+        // 再同时喂给关键字表与条目标记表。内置与用户不是两套入口，差别只在合并顺序：
+        // 文档定义在前（同目标同变体时优先），内置声明补足缺省。
+        var declarations = MergeBuiltInDeclarations(_builtInDeclarations, definitions);
+
+        // 围栏关键字注册表按运行时重建（不是静态查表）：内置声明打底，定义声明的首词追加在后。
+        // 转换器与块解析器共用这一份，定义改了关键字必然换运行时。
+        var fenceKeywords = FenceKeywordRegistry.Create(declarations);
+
+        // 三单引号族只有一个分派解析器：关键字→目标来自数据面，目标→块类型走块工厂表。
+        var primeFenceParser = new FenceDispatchParser(fenceKeywords, ResolveItemMarkers(declarations));
+
+        pipelineBuilder.BlockParsers.Insert(0, primeFenceParser);
+
+        // 定义在构造期校验；无定义时不注册解析器，保持旧管线逐字节一致。
+        var registry = new UserBlockRegistry(definitions);
+
+        // 围栏字符由定义数据决定，注册次序按族固定：单引号族在内置分派器之后（内置优先），
+        // 代码围栏族在 Markdig FencedCodeBlockParser 之前（定义优先），其余字符最高优先。
+        // 新增一个围栏字符只加定义数据，这里不新增按元素的判断。
+        UserBlockParser? codeFenceParser = null;
+        foreach (var fenceChar in registry.DeclaredFenceChars.Distinct())
+        {
+            if (fenceChar == UserBlockRegistry.PrimeFenceChar)
+            {
+                var primeIndex = IndexOfParser(pipelineBuilder.BlockParsers, primeFenceParser) + 1;
+                pipelineBuilder.BlockParsers.Insert(primeIndex, new UserBlockParser(registry, fenceChar));
+                continue;
+            }
+
+            var userBlockParser = new UserBlockParser(registry, fenceChar);
+            if (fenceChar is UserBlockRegistry.BacktickFenceChar or UserBlockRegistry.TildeFenceChar)
+            {
+                codeFenceParser = userBlockParser;
+            }
+
+            pipelineBuilder.BlockParsers.Insert(0, userBlockParser);
+        }
+
+        // 显式契约：代码围栏族的定义解析器必须位于 FencedCodeBlockParser 之前。
+        // 位移顺序若被未来的插入改动破坏，这里立即失败，而不是让定义静默退回代码块。
+        if (codeFenceParser is not null)
+        {
+            var userIndex = IndexOfParser(pipelineBuilder.BlockParsers, codeFenceParser);
+            var fencedIndex = IndexOfParser(pipelineBuilder.BlockParsers, typeof(FencedCodeBlockParser));
+            if (userIndex < 0 || fencedIndex < 0 || userIndex > fencedIndex)
+            {
+                throw new InvalidOperationException(
+                    "代码围栏族定义解析器必须先于 Markdig FencedCodeBlockParser："
+                    + $"user={userIndex}, fenced={fencedIndex}。");
+            }
+        }
+
+        var pipeline = pipelineBuilder.Build();
 
         // 转换器需要 pipeline 以递归解析时间线节点正文。
-        _converter = new MarkdigToNodeConverter(_nodeFactory, _pipeline);
+        var converter = new MarkdigToNodeConverter(
+            _nodeFactory,
+            registry,
+            fenceKeywords,
+            ResolveInlineHtmlDefinition(declarations),
+            ResolveBlockHtmlDefinition(declarations));
+        return new ParseRuntime(pipeline, converter, registry, definitions);
+    }
+
+    /// <summary>
+    /// 行内 HTML 白名单的解析侧取值：文档定义在前、内置兜底，取首条
+    /// <c>applies-to="HtmlInline"</c> 且带 <c>&lt;inline-html&gt;</c> 声明的定义。
+    /// 没有声明时返回 <c>null</c>，转换器保持翻案前的“标签丢弃、保留文字”。
+    /// </summary>
+    internal static InlineHtmlDefinition? ResolveInlineHtmlDefinition(
+        IReadOnlyList<UserBlockDefinition>? definitions)
+    {
+        if (definitions is null)
+        {
+            return null;
+        }
+
+        foreach (var definition in definitions)
+        {
+            if (!string.Equals(definition.AppliesTo, nameof(NodeType.HtmlInline), StringComparison.OrdinalIgnoreCase)
+                || definition.RenderEnabled == false
+                || definition.InlineHtml is null)
+            {
+                continue;
+            }
+
+            return definition.InlineHtml;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 块级 HTML 白名单的解析侧取值：文档定义在前、内置兜底，取首条
+    /// <c>applies-to="HtmlBlock"</c> 且带 <c>&lt;block-html&gt;</c> 声明的定义。
+    /// 没有声明时返回 <c>null</c>，转换器保持翻案前的“整段转义”。
+    /// </summary>
+    internal static InlineHtmlDefinition? ResolveBlockHtmlDefinition(
+        IReadOnlyList<UserBlockDefinition>? definitions)
+    {
+        if (definitions is null)
+        {
+            return null;
+        }
+
+        foreach (var definition in definitions)
+        {
+            if (!string.Equals(definition.AppliesTo, nameof(NodeType.HtmlBlock), StringComparison.OrdinalIgnoreCase)
+                || definition.RenderEnabled == false
+                || definition.BlockHtml is null)
+            {
+                continue;
+            }
+
+            return definition.BlockHtml;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 解析侧的唯一声明来源：文档定义在前、内置数据面在后。两者走同一条装载路径，
+    /// 内置不再有第二套硬编码（解析相关字段只从这条合并结果读取）。
+    /// 文档定义在前意味着同目标同变体时文档定义优先；内置补足文档未覆盖的目标。
+    /// </summary>
+    internal static IReadOnlyList<UserBlockDefinition> MergeBuiltInDeclarations(
+        IReadOnlyList<UserBlockDefinition> builtIns,
+        IReadOnlyList<UserBlockDefinition>? definitions)
+    {
+        ArgumentNullException.ThrowIfNull(builtIns);
+        if (definitions is null || definitions.Count == 0)
+        {
+            return builtIns;
+        }
+
+        var merged = new List<UserBlockDefinition>(definitions.Count + builtIns.Count);
+        merged.AddRange(definitions);
+        merged.AddRange(builtIns);
+        return merged;
+    }
+
+    /// <summary>
+    /// 容器条目标记来自定义声明的 <c>item-marker</c>：按定义声明的目标类型（<c>applies-to</c>）
+    /// 建表，同一目标有多档定义时以 <c>default</c> 变体为准；时间线未声明时回落 <c>@@</c>
+    /// （旧行为逐字节不变）。查的是数据，不按元素类型写分支。
+    /// </summary>
+    internal static IReadOnlyDictionary<FenceTarget, string> ResolveItemMarkers(
+        IReadOnlyList<UserBlockDefinition>? definitions)
+    {
+        var markers = new Dictionary<FenceTarget, string>();
+        var defaults = new Dictionary<FenceTarget, bool>();
+
+        foreach (var definition in definitions ?? [])
+        {
+            if (definition.ItemMarker is null || definition.AppliesTo is null
+                || !FenceOpenTargets.TryGetTarget(definition.AppliesTo, out var target))
+            {
+                continue;
+            }
+
+            var isDefault = string.Equals(
+                definition.Variant ?? "default",
+                "default",
+                StringComparison.OrdinalIgnoreCase);
+            var hasExisting = markers.ContainsKey(target);
+            if (!hasExisting || (isDefault && !defaults[target]))
+            {
+                markers[target] = definition.ItemMarker;
+                defaults[target] = isDefault;
+            }
+        }
+
+        // 时间线标记的历史缺省：未声明时逐字节沿用 @@。
+        markers.TryAdd(FenceTarget.Timeline, TimelineMarker.DefaultMarker);
+        return markers;
+    }
+
+    private static int IndexOfParser(IList<BlockParser> parsers, BlockParser parser)
+    {
+        for (var i = 0; i < parsers.Count; i++)
+        {
+            if (ReferenceEquals(parsers[i], parser))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private static int IndexOfParser(IList<BlockParser> parsers, Type parserType)
+    {
+        for (var i = 0; i < parsers.Count; i++)
+        {
+            if (parsers[i].GetType() == parserType)
+            {
+                return i;
+            }
+        }
+
+        return -1;
     }
 
     public ParseResult Parse(
         string source,
         MarkdownDocument? previous = null,
-        ParseMode mode = ParseMode.Editing)
+        ParseMode mode = ParseMode.Editing,
+        IReadOnlyList<UserBlockDefinition>? userBlocks = null,
+        IReadOnlyList<UserBlockDefinition>? sourceUserBlocks = null,
+        UserBlockComposition? composition = null)
     {
         source ??= string.Empty;
 
+        // 显式定义 > previous 记录的定义 > 解析器配置；previous 是空集合时不能把它
+        // 当作“无定义”，否则配置里定义的用户块会在第二次解析时消失。
+        // 这里要的是“展开形态”：组合引用不能留到解析运行时。
+        var definitions = userBlocks
+            ?? (previous is not null && previous.EffectiveUserBlockDefinitions.Count > 0
+                ? previous.EffectiveUserBlockDefinitions
+                : null);
+        var runtime = GetRuntime(definitions);
         var diagnostics = new List<DiagnosticMessage>();
-        var root = ParseTreeCore(source, previous?.Root, diagnostics, previous?.SourceMarkdown);
+        var root = ParseTreeCore(source, previous?.Root, diagnostics, previous?.SourceMarkdown, runtime);
 
         var document = previous ?? new MarkdownDocument();
         document.ReplaceParsedRoot(root, source, markChanged: mode == ParseMode.Editing);
+
+        // 组合单元先落地：定义集合一经写入就要按新单元展开，
+        // 否则 EffectiveUserBlockDefinitions 会对着旧单元算。
+        if (composition is not null)
+        {
+            document.ApplyUserBlockComposition(composition);
+        }
+
+        // 文档记住本次解析实际使用的定义，后续编辑原样带上。必须用调用方本次
+        // 传入的定义，不能用缓存运行时的定义：运行时按语法+结构命中，但写回
+        // 陈旧定义会让“只改结构”在重开文档时被静默回退。
+        // sourceUserBlocks 是“来源形态”：装载期从这里保留 ref，落盘不写展开结果。
+        document.ApplyUserBlockDefinitions(sourceUserBlocks ?? definitions ?? runtime.AllDefinitions);
+
+        if (mode == ParseMode.Loading)
+        {
+            // 重开文档包：文件里不为“定义默认”单独落盘，按“值 = 定义默认”反推来源（近似，见方法注释）。
+            document.InferAttributeSourcesFromDefinitions();
+        }
+
+        // 显式声明了 DefaultValue 的定义默认注入生效属性，渲染层只读 Attributes 也能拿到；
+        // 没有声明的键保持缺席，继续走渲染器内置默认。
+        document.ApplyDeclaredAttributeDefaults();
 
         if (mode == ParseMode.Loading)
         {
@@ -76,32 +407,374 @@ public sealed class MarkdownParser : IMarkdownParser
         return new ParseResult(document, diagnostics);
     }
 
-    public MarkdownNode ParseTree(string source, MarkdownNode? previousRoot, string? previousSource = null)
+    public MarkdownNode ParseTree(
+        string source,
+        MarkdownNode? previousRoot,
+        string? previousSource = null,
+        IReadOnlyList<UserBlockDefinition>? userBlocks = null)
     {
         source ??= string.Empty;
         var diagnostics = new List<DiagnosticMessage>();
-        return ParseTreeCore(source, previousRoot, diagnostics, previousSource);
+        return ParseTreeCore(source, previousRoot, diagnostics, previousSource, GetRuntime(userBlocks));
+    }
+
+    /// <summary>
+    /// 定义变更后的定向重解析：只重解析源码里出现“变化定义”围栏、或旧树里
+    /// 带变化 custom-kind 的顶层块，其余块按引用复用。
+    /// </summary>
+    public MarkdownNode ReparseForUserBlockChange(
+        string source,
+        MarkdownNode previousRoot,
+        UserBlockSyntaxChange change)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(previousRoot);
+        ArgumentNullException.ThrowIfNull(change);
+
+        var runtime = GetRuntime(change.Definitions);
+        if (!change.HasChanges)
+        {
+            return previousRoot;
+        }
+
+        var previousBlocks = FlattenConcreteBlocks(previousRoot);
+        if (previousBlocks.Count == 0)
+        {
+            return previousRoot;
+        }
+
+        var changedDefinitions = change.Definitions
+            .Where(definition => change.ChangedIds.Contains(definition.Id))
+            .ToList();
+
+        // 首词分派声明一变，旧树里“本来不是块”的行可能变成块，而这些行没有旧块可失效。
+        // 增量失效兜不住，只能整篇重建；否则新形态在增量解析里静默不生效。
+        // 只看定义声明（opens），不针对具体元素写分支。
+        if (changedDefinitions.Any(definition => !string.IsNullOrEmpty(definition.Opens)))
+        {
+            return FullRebuildForDefinitions(source, previousRoot, runtime);
+        }
+
+        var invalidated = new bool[previousBlocks.Count];
+        for (var i = 0; i < previousBlocks.Count; i++)
+        {
+            invalidated[i] = ReferencesChangedDefinition(previousBlocks[i], change.ChangedIds)
+                || ContainsChangedFence(source, previousBlocks[i].Range, changedDefinitions)
+                || MatchesChangedAppliesTo(previousBlocks[i], changedDefinitions);
+        }
+
+        if (!invalidated.Any(flag => flag))
+        {
+            // 没有任何块依赖变化的定义：整棵树原样复用，连 Section 都不重建。
+            return previousRoot;
+        }
+
+        var merged = new List<MarkdownNode>(previousBlocks.Count + 4);
+        var priorTreeNodes = new HashSet<MarkdownNode>();
+
+        var index = 0;
+        while (index < previousBlocks.Count)
+        {
+            if (!invalidated[index])
+            {
+                merged.Add(previousBlocks[index]);
+                priorTreeNodes.Add(previousBlocks[index]);
+                index++;
+                continue;
+            }
+
+            var last = index;
+            while (last + 1 < previousBlocks.Count && invalidated[last + 1])
+            {
+                last++;
+            }
+
+            var sliceStart = GetLineStart(source, previousBlocks[index].Range.StartOffset);
+            var sliceEnd = GetLineStartAfter(source, previousBlocks[last].Range.EndOffset);
+            if (sliceStart < 0 || sliceEnd < sliceStart || sliceEnd > source.Length)
+            {
+                return FullRebuildForDefinitions(source, previousRoot, runtime);
+            }
+
+            var sliceBlocks = TryConvertSlice(source.Substring(sliceStart, sliceEnd - sliceStart), runtime);
+            if (sliceBlocks is null)
+            {
+                return FullRebuildForDefinitions(source, previousRoot, runtime);
+            }
+
+            var lineDelta = CountLineBreaks(source.AsSpan(0, sliceStart));
+            foreach (var block in sliceBlocks)
+            {
+                ShiftBlockRange(block, sliceStart, lineDelta);
+            }
+
+            merged.AddRange(sliceBlocks);
+            index = last + 1;
+        }
+
+        var root = _sectionBuilder.Build(merged, priorTreeNodes);
+        _identityMatcher.Match(previousRoot, root);
+        return root;
+    }
+
+    public MarkdownNode UpdateUserBlockDefinitions(
+        MarkdownDocument document,
+        IReadOnlyList<UserBlockDefinition> definitions,
+        UserBlockComposition? composition = null)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        ArgumentNullException.ThrowIfNull(definitions);
+
+        var nextComposition = composition ?? document.Composition;
+
+        // 定义集合存“来源形态”（ref 原文保留），解析运行时要“展开形态”（渲染器/解析器不见 ref）。
+        var expanded = UserBlockCompositionRules.ExpandAll(definitions, nextComposition);
+
+        var changedIds = new HashSet<string>(
+            UserBlockSyntaxFingerprint.ComputeChangedIds(document.UserBlockDefinitions, definitions),
+            StringComparer.OrdinalIgnoreCase);
+
+        // 继承传播：父定义变化时，所有继承它的后代都要进 changedIds，
+        // 否则只改父定义（围栏字符/别名/属性……）时子定义会留在旧解析树上。
+        // 用新旧两套 Extends 关系做传递闭包，覆盖“父改名/换父”这些边也变了的场景。
+        PropagateInheritedChanges(changedIds, document.UserBlockDefinitions, definitions);
+
+        // 只改组合单元（片段内容/属性组）时，没有任何一条源定义的语法指纹变化，
+        // 但引用者的展开结构变了。按单元本身的规范文本判一次：变了就把全部定义记为
+        // 已变更，让引用者整体失效（variant 与 opens 都在“键没带依赖”上栽过）。
+        // 只改定义自身的结构不走这条：那由渲染器按结构指纹重渲，不需要重解析。
+        if (!string.Equals(
+                UserBlockElementsSerializer.Serialize([], document.Composition),
+                UserBlockElementsSerializer.Serialize([], nextComposition),
+                StringComparison.Ordinal))
+        {
+            foreach (var definition in definitions)
+            {
+                changedIds.Add(definition.Id);
+            }
+
+            foreach (var definition in document.UserBlockDefinitions)
+            {
+                changedIds.Add(definition.Id);
+            }
+        }
+
+        var change = new UserBlockSyntaxChange(expanded, changedIds);
+        var root = ReparseForUserBlockChange(document.SourceMarkdown, document.Root, change);
+
+        document.ReplaceParsedRoot(root, document.SourceMarkdown, markChanged: false);
+        document.ApplyUserBlockComposition(nextComposition);
+        document.ApplyUserBlockDefinitions(definitions);
+
+        // 与编辑命令同一顺序：先按新定义补/清声明默认值，再广播变更，
+        // 订阅方（已打开的编辑器）读到的就是“定义 + 默认 + 重解析”的完整状态。
+        document.ApplyDeclaredAttributeDefaults();
+        document.NotifyUserBlockDefinitionsChanged();
+        return root;
+    }
+
+    // 继承传播：把 changedIds 沿 Extends 关系做传递闭包（新旧两套关系都算）。
+    private static void PropagateInheritedChanges(
+        HashSet<string> changedIds,
+        IEnumerable<UserBlockDefinition>? previous,
+        IEnumerable<UserBlockDefinition>? current)
+    {
+        if (changedIds.Count == 0) return;
+
+        var relations = new List<(string Child, string Parent)>();
+        AddRelations(previous, relations);
+        AddRelations(current, relations);
+        if (relations.Count == 0) return;
+
+        var changed = true;
+        while (changed)
+        {
+            changed = false;
+            foreach (var (child, parent) in relations)
+            {
+                if (changedIds.Contains(parent) && changedIds.Add(child))
+                {
+                    changed = true;
+                }
+            }
+        }
+
+        static void AddRelations(
+            IEnumerable<UserBlockDefinition>? definitions,
+            List<(string Child, string Parent)> target)
+        {
+            if (definitions is null) return;
+            foreach (var definition in definitions)
+            {
+                if (!string.IsNullOrEmpty(definition.Extends))
+                {
+                    target.Add((definition.Id, definition.Extends!));
+                }
+            }
+        }
+    }
+
+    private MarkdownNode FullRebuildForDefinitions(
+        string source,
+        MarkdownNode previousRoot,
+        ParseRuntime runtime)
+    {
+        var blocks = ParseBlocks(source, new List<DiagnosticMessage>(), runtime);
+        var root = _sectionBuilder.Build(blocks);
+        _identityMatcher.Match(previousRoot, root);
+        return root;
+    }
+
+    // 旧树里是否有节点由变化定义产生（含被删除/改名的定义）。
+    private static bool ReferencesChangedDefinition(MarkdownNode node, IReadOnlySet<string> changedIds)
+    {
+        if (node.Type == NodeType.Custom
+            && node.Attributes.TryGetValue("custom-kind", out var kind)
+            && changedIds.Contains(kind))
+        {
+            return true;
+        }
+
+        foreach (var child in node.Children)
+        {
+            if (ReferencesChangedDefinition(child, changedIds))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // 定义声明的内置目标类型与块类型一致时，该块整体失效：applies-to 定义可以改变
+    // 解析产物（如容器的 item-marker），不能只按 custom-kind 或围栏关键字判断。
+    // 判定只看定义声明，不针对具体元素写分支。
+    private static bool MatchesChangedAppliesTo(
+        MarkdownNode node,
+        IReadOnlyList<UserBlockDefinition> changedDefinitions)
+    {
+        foreach (var definition in changedDefinitions)
+        {
+            if (definition.AppliesTo is not null
+                && string.Equals(node.Type.ToString(), definition.AppliesTo, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // 块源码里是否出现变化定义能识别（或曾经识别）的开围栏行。
+    // 只扫变化定义，未变化的元素不会让任何块失效。
+    private static bool ContainsChangedFence(
+        string source,
+        SourceRange range,
+        IReadOnlyList<UserBlockDefinition> changedDefinitions)
+    {
+        if (changedDefinitions.Count == 0 || range.StartOffset < 0)
+        {
+            return false;
+        }
+
+        var start = Math.Clamp(range.StartOffset, 0, source.Length);
+        var end = Math.Clamp(range.EndOffset, start, source.Length);
+
+        var pos = start;
+        while (pos <= end && pos < source.Length)
+        {
+            var lineEnd = source.IndexOf('\n', pos);
+            if (lineEnd < 0 || lineEnd > end) lineEnd = end;
+
+            if (TryReadUserFenceName(source, pos, lineEnd, out var fenceChar, out var fenceLength, out var name))
+            {
+                foreach (var definition in changedDefinitions)
+                {
+                    // 同名跨族互不影响：围栏字符必须在该定义声明的集合内才算命中；
+                    // 别名与本名同等参与失效判定（新增别名也要让旧块重扫）。
+                    if (definition.UsesFenceChar(fenceChar)
+                        && fenceLength >= definition.FenceLength
+                        && definition.MatchesKeyword(name))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            if (lineEnd >= end) break;
+            pos = lineEnd + 1;
+        }
+
+        return false;
+    }
+
+    // 与 UserBlockParser 相同的开围栏读取：最多三空格缩进 + 定义声明的围栏符 + 名称整词。
+    // 围栏符可声明，这里只做“是否可能是围栏符”的粗筛，具体归属由变化定义逐条判定。
+    private static bool TryReadUserFenceName(
+        string source,
+        int lineStart,
+        int lineEnd,
+        out char fenceChar,
+        out int fenceLength,
+        out string name)
+    {
+        fenceChar = '\0';
+        fenceLength = 0;
+        name = string.Empty;
+
+        var i = lineStart;
+        var spaces = 0;
+        while (i < lineEnd && source[i] == ' ' && spaces < 3)
+        {
+            i++;
+            spaces++;
+        }
+
+        if (i >= lineEnd || !UserBlockRegistry.IsSupportedFenceChar(source[i]))
+        {
+            return false;
+        }
+
+        fenceChar = source[i];
+        var fenceStart = i;
+        while (i < lineEnd && source[i] == fenceChar)
+        {
+            i++;
+        }
+
+        fenceLength = i - fenceStart;
+        if (fenceLength < UserBlockRegistry.MinFenceLength) return false;
+
+        while (i < lineEnd && (source[i] == ' ' || source[i] == '\t')) i++;
+
+        var nameStart = i;
+        while (i < lineEnd && !char.IsWhiteSpace(source[i])) i++;
+        if (i == nameStart) return false;
+
+        name = source.Substring(nameStart, i - nameStart);
+        return true;
     }
 
     private MarkdownNode ParseTreeCore(
         string source,
         MarkdownNode? previousRoot,
         ICollection<DiagnosticMessage> diagnostics,
-        string? previousSource = null)
+        string? previousSource,
+        ParseRuntime runtime)
     {
         if (previousRoot is not null
-            && TryParseAppendedSuffix(source, previousSource, previousRoot, diagnostics, out var incrementalRoot))
+            && TryParseAppendedSuffix(source, previousSource, previousRoot, diagnostics, runtime, out var incrementalRoot))
         {
             return incrementalRoot;
         }
 
         if (previousRoot is not null
-            && TryParseModifiedRegion(source, previousSource, previousRoot, diagnostics, out incrementalRoot))
+            && TryParseModifiedRegion(source, previousSource, previousRoot, diagnostics, runtime, out incrementalRoot))
         {
             return incrementalRoot;
         }
 
-        var blocks = ParseBlocks(source, diagnostics);
+        var blocks = ParseBlocks(source, diagnostics, runtime);
         var root = _sectionBuilder.Build(blocks);
 
         if (previousRoot is not null)
@@ -127,6 +800,7 @@ public sealed class MarkdownParser : IMarkdownParser
         string? previousSource,
         MarkdownNode previousRoot,
         ICollection<DiagnosticMessage> diagnostics,
+        ParseRuntime runtime,
         out MarkdownNode root)
     {
         root = null!;
@@ -216,22 +890,16 @@ public sealed class MarkdownParser : IMarkdownParser
                 continue;
             }
 
-            Markdig.Syntax.MarkdownDocument probeDocument;
-            try
-            {
-                probeDocument = Markdig.Markdown.Parse(probeText, _pipeline);
-            }
-            catch
-            {
-                // 探测解析异常不致命：交回全量路径记录诊断。
-                return false;
-            }
-
             List<MarkdownNode> probeBlocks;
             try
             {
-                // 探测块 Range 为局部坐标，选中边界后统一平移。
-                probeBlocks = _converter.ConvertBlocks(probeDocument, new List<DiagnosticMessage>(), probeText);
+                // 探测块 Range 为局部坐标，选中边界后统一平移；解析侧产物按探测文本判定。
+                probeBlocks = ParsedDocumentPipeline.ParseAndConvert(
+                    probeText,
+                    runtime.Pipeline,
+                    runtime.Converter,
+                    runtime.Registry,
+                    new List<DiagnosticMessage>());
             }
             catch
             {
@@ -487,6 +1155,7 @@ public sealed class MarkdownParser : IMarkdownParser
         string? previousSource,
         MarkdownNode previousRoot,
         ICollection<DiagnosticMessage> diagnostics,
+        ParseRuntime runtime,
         out MarkdownNode root)
     {
         root = null!;
@@ -606,15 +1275,10 @@ public sealed class MarkdownParser : IMarkdownParser
         }
 
         // 未闭合围栏一路吃到 EOF，其后任何编辑都可能改变跨度，直接全量。
-        foreach (var block in oldBlocks)
+        // 统一按 unclosed 属性判断，新增围栏类型无需再维护类型清单。
+        if (ContainsUnclosedFence(oldBlocks))
         {
-            if ((block.Type == NodeType.CodeBlock || block.Type == NodeType.ImageMatrix
-                    || block.Type == NodeType.QrCode || block.Type == NodeType.PoemBlock
-                    || block.Type == NodeType.Timeline || block.Type == NodeType.Radar)
-                && block.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
-            {
-                return false;
-            }
+            return false;
         }
 
         const int maxExpand = 8;
@@ -637,7 +1301,7 @@ public sealed class MarkdownParser : IMarkdownParser
                 if (oldBlocks[i].Range.StartOffset < bOld) return false;
             }
 
-            middleBlocks = TryConvertSlice(source.Substring(a, bNew - a));
+            middleBlocks = TryConvertSlice(source.Substring(a, bNew - a), runtime);
             if (middleBlocks is null)
             {
                 return false;
@@ -681,7 +1345,7 @@ public sealed class MarkdownParser : IMarkdownParser
                         oldBlocks[suffixStart].Range.EndLine + currentSuffixLineDelta));
                 }
 
-                var probe = TryConvertSlice(source.Substring(probeStart, probeEnd - probeStart));
+                var probe = TryConvertSlice(source.Substring(probeStart, probeEnd - probeStart), runtime);
                 if (probe is null)
                 {
                     leftSealed = false;
@@ -736,7 +1400,7 @@ public sealed class MarkdownParser : IMarkdownParser
                     }
                 }
 
-                var probe = TryConvertSlice(source.Substring(probeStart, probeEnd - probeStart));
+                var probe = TryConvertSlice(source.Substring(probeStart, probeEnd - probeStart), runtime);
                 if (probe is null)
                 {
                     rightSealed = false;
@@ -868,12 +1532,16 @@ public sealed class MarkdownParser : IMarkdownParser
         return true;
     }
 
-    private List<MarkdownNode>? TryConvertSlice(string text)
+    private List<MarkdownNode>? TryConvertSlice(string text, ParseRuntime runtime)
     {
         try
         {
-            var markdigDoc = Markdig.Markdown.Parse(text, _pipeline);
-            return _converter.ConvertBlocks(markdigDoc, new List<DiagnosticMessage>(), text);
+            return ParsedDocumentPipeline.ParseAndConvert(
+                text,
+                runtime.Pipeline,
+                runtime.Converter,
+                runtime.Registry,
+                new List<DiagnosticMessage>());
         }
         catch
         {
@@ -1004,21 +1672,15 @@ public sealed class MarkdownParser : IMarkdownParser
     }
 
     // 递归检测块子树内是否存在未闭合围栏（含嵌套在列表/引用中的围栏）。
+    // 以 unclosed 属性为准：代码/公式/图片矩阵/诗词/时间线/雷达图由解析侧
+    // UnclosedBlockMarker 标记，用户自定义块由 UserBlock.Closed 标记；新增类型无需改动这里。
     private static bool ContainsUnclosedFence(IEnumerable<MarkdownNode> nodes)
     {
         foreach (var node in nodes)
         {
-            if (node.Type == NodeType.CodeBlock
-                || node.Type == NodeType.ImageMatrix
-                || node.Type == NodeType.QrCode
-                || node.Type == NodeType.PoemBlock
-                || node.Type == NodeType.Timeline
-                || node.Type == NodeType.Radar)
+            if (node.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
             {
-                if (node.Attributes.ContainsKey(MarkdownAttributes.Unclosed))
-                {
-                    return true;
-                }
+                return true;
             }
             if (ContainsUnclosedFence(node.Children)) return true;
         }
@@ -1098,6 +1760,18 @@ public sealed class MarkdownParser : IMarkdownParser
         foreach (var pair in node.Attributes)
         {
             clone.Attributes[pair.Key] = pair.Value;
+        }
+
+        // 来源与实例回退层必须一并克隆：否则被复用的旧块会退化成“来源未知的实例值”，
+        // 在重解析时错误地压过定义默认值。
+        foreach (var pair in node.AttributeSources)
+        {
+            clone.AttributeSources[pair.Key] = pair.Value;
+        }
+
+        foreach (var pair in node.InstanceAttributes)
+        {
+            clone.InstanceAttributes[pair.Key] = pair.Value;
         }
 
         // 手动挂接：AddChild 会把孩子从旧树摘除。包含判定用原始坐标。
@@ -1190,15 +1864,19 @@ public sealed class MarkdownParser : IMarkdownParser
 
     private IReadOnlyList<MarkdownNode> ParseBlocks(
         string source,
-        ICollection<DiagnosticMessage> diagnostics)
+        ICollection<DiagnosticMessage> diagnostics,
+        ParseRuntime runtime)
     {
-        Markdig.Syntax.MarkdownDocument markdigDoc;
-
         try
         {
-            markdigDoc = Markdig.Markdown.Parse(source, _pipeline);
+            return ParsedDocumentPipeline.ParseAndConvert(
+                source,
+                runtime.Pipeline,
+                runtime.Converter,
+                runtime.Registry,
+                diagnostics);
         }
-        catch (Exception ex)
+        catch (ParsedDocumentException ex) when (ex.Stage == ParsedDocumentStage.Parse)
         {
             diagnostics.Add(new DiagnosticMessage
             {
@@ -1209,11 +1887,6 @@ public sealed class MarkdownParser : IMarkdownParser
             });
 
             return Array.Empty<MarkdownNode>();
-        }
-
-        try
-        {
-            return _converter.ConvertBlocks(markdigDoc, diagnostics, source);
         }
         catch (Exception ex)
         {

@@ -2,6 +2,7 @@ using System;
 using System.Globalization;
 using System.Linq;
 using System.Xml.Linq;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Styling;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Schema;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Persistence.Serialization;
@@ -189,6 +190,28 @@ internal static class DocumentXmlWriter
                     new XElement(
                         nsX + "Attributes",
                         node.Attributes.Select(attribute =>
+                        {
+                            var attributeElement = new XElement(
+                                nsX + "Attribute",
+                                new XAttribute("Key", attribute.Key ?? string.Empty),
+                                new XAttribute("Value", EncodeValue(attribute.Value)));
+
+                            // 缺省来源即 Instance（兼容旧包）；Mapper 只把非 Instance 的来源放进字典。
+                            if (node.AttributeSources.TryGetValue(attribute.Key ?? string.Empty, out var source))
+                            {
+                                attributeElement.Add(new XAttribute("Source", source));
+                            }
+
+                            return attributeElement;
+                        })));
+            }
+
+            if (node.InstanceAttributes.Count > 0)
+            {
+                element.Add(
+                    new XElement(
+                        nsX + "InstanceAttributes",
+                        node.InstanceAttributes.Select(attribute =>
                             new XElement(
                                 nsX + "Attribute",
                                 new XAttribute("Key", attribute.Key ?? string.Empty),
@@ -223,6 +246,11 @@ internal static class DocumentXmlWriter
                 element.Add(new XAttribute("AppliesTo", style.AppliesTo));
             }
 
+            if (!string.IsNullOrWhiteSpace(style.AppliesToKind))
+            {
+                element.Add(new XAttribute("AppliesToKind", style.AppliesToKind));
+            }
+
             if (style.Style is not null)
             {
                 var styleValueElement = new XElement(nsX + "StyleValue");
@@ -231,6 +259,225 @@ internal static class DocumentXmlWriter
                 {
                     element.Add(styleValueElement);
                 }
+            }
+
+            // 类型定义才写声明与行为；命名样式保持旧格式，避免无关文件膨胀。
+            if (!string.IsNullOrWhiteSpace(style.AppliesTo) && style.Attributes.Count > 0)
+            {
+                element.Add(
+                    new XElement(
+                        nsX + "ElementAttributes",
+                        style.Attributes.Select(WriteElementAttribute)));
+            }
+
+            if (!string.IsNullOrWhiteSpace(style.AppliesTo) &&
+                style.Behavior is not null &&
+                (!string.Equals(
+                     style.Behavior.FrameStrategy,
+                     nameof(ElementFrameStrategy.Auto),
+                     StringComparison.Ordinal) ||
+                 !string.Equals(
+                     style.Behavior.TemplateVariant,
+                     nameof(ElementTemplateVariant.Default),
+                     StringComparison.Ordinal)))
+            {
+                var behavior = new XElement(
+                    nsX + "Behavior",
+                    new XAttribute("FrameStrategy", style.Behavior.FrameStrategy));
+
+                if (!string.Equals(
+                        style.Behavior.TemplateVariant,
+                        nameof(ElementTemplateVariant.Default),
+                        StringComparison.Ordinal))
+                {
+                    behavior.Add(new XAttribute("TemplateVariant", style.Behavior.TemplateVariant));
+                }
+
+                element.Add(behavior);
+            }
+
+            return element;
+        }
+
+        XElement WriteElementAttribute(ElementAttributeDeclarationDto attribute)
+        {
+            var element = new XElement(
+                nsX + "ElementAttribute",
+                new XAttribute("Key", attribute.Key ?? string.Empty),
+                new XAttribute("Label", attribute.Label ?? string.Empty),
+                new XAttribute("Kind", attribute.ValueKind ?? nameof(ElementAttributeValueKind.Text)));
+
+            if (!string.IsNullOrEmpty(attribute.DefaultValue))
+            {
+                element.Add(new XAttribute("Default", EncodeValue(attribute.DefaultValue)));
+            }
+
+            if (!string.IsNullOrEmpty(attribute.Hint))
+            {
+                element.Add(new XAttribute("Hint", EncodeValue(attribute.Hint)));
+            }
+
+            if (!attribute.IsEnabled)
+            {
+                element.Add(new XAttribute("Enabled", "0"));
+            }
+
+            if (!string.Equals(
+                    attribute.Target,
+                    nameof(ElementAttributeTarget.DocumentAttribute),
+                    StringComparison.Ordinal))
+            {
+                element.Add(new XAttribute("Target", attribute.Target));
+            }
+
+            if (attribute.IsDerived)
+            {
+                element.Add(new XAttribute("Derived", "1"));
+            }
+
+            if (!string.IsNullOrEmpty(attribute.Group))
+            {
+                element.Add(new XAttribute("Group", EncodeValue(attribute.Group)));
+            }
+
+            if (attribute.Options.Count > 0)
+            {
+                element.Add(
+                    new XElement(
+                        nsX + "Options",
+                        attribute.Options.Select(option =>
+                            new XElement(nsX + "Option", new XAttribute("Value", EncodeValue(option))))));
+            }
+
+            // 绑定只在配了目标名时写出，避免空绑定污染文件。
+            if (!string.IsNullOrWhiteSpace(attribute.BindingName))
+            {
+                var binding = new XElement(
+                    nsX + "Binding",
+                    new XAttribute(
+                        "Target",
+                        attribute.BindingTarget ?? nameof(ElementAttributeBindingTarget.CssVar)),
+                    new XAttribute("Name", EncodeValue(attribute.BindingName)));
+
+                if (!string.IsNullOrWhiteSpace(attribute.BindingPart))
+                {
+                    binding.Add(new XAttribute("Part", EncodeValue(attribute.BindingPart)));
+                }
+
+                if (!string.IsNullOrWhiteSpace(attribute.BindingValueMap))
+                {
+                    binding.Add(new XAttribute("ValueMap", EncodeValue(attribute.BindingValueMap)));
+                }
+
+                element.Add(binding);
+            }
+
+            // 呈现设置全默认时 Mapper 已置空，这里只为非空（即确有设置）的声明写节点，
+            // 保证老文件与“未设置”完全等价。
+            if (attribute.Presentation is not null)
+            {
+                element.Add(WritePresentation(attribute.Presentation));
+            }
+
+            return element;
+        }
+
+        XElement WritePresentation(ElementAttributePresentationDto presentation)
+        {
+            var element = new XElement(nsX + "Presentation");
+
+            if (!string.Equals(
+                    presentation.Control,
+                    nameof(ElementAttributeControlKind.Auto),
+                    StringComparison.Ordinal))
+            {
+                element.Add(new XAttribute("Control", presentation.Control));
+            }
+
+            if (!string.Equals(
+                    presentation.Width,
+                    nameof(ElementAttributeFieldWidth.Auto),
+                    StringComparison.Ordinal))
+            {
+                element.Add(new XAttribute("Width", presentation.Width));
+            }
+
+            if (presentation.Order is { } order)
+            {
+                element.Add(new XAttribute(
+                    "Order",
+                    order.ToString(CultureInfo.InvariantCulture)));
+            }
+
+            if (presentation.IsAdvanced)
+            {
+                element.Add(new XAttribute("Advanced", "true"));
+            }
+
+            if (!string.IsNullOrEmpty(presentation.Placeholder))
+            {
+                element.Add(new XAttribute("Placeholder", EncodeValue(presentation.Placeholder)));
+            }
+
+            if (!string.IsNullOrEmpty(presentation.Unit))
+            {
+                element.Add(new XAttribute("Unit", EncodeValue(presentation.Unit)));
+            }
+
+            if (presentation.Min is { } min)
+            {
+                element.Add(new XAttribute(
+                    "Min",
+                    min.ToString(CultureInfo.InvariantCulture)));
+            }
+
+            if (presentation.Max is { } max)
+            {
+                element.Add(new XAttribute(
+                    "Max",
+                    max.ToString(CultureInfo.InvariantCulture)));
+            }
+
+            if (presentation.Step is { } step)
+            {
+                element.Add(new XAttribute(
+                    "Step",
+                    step.ToString(CultureInfo.InvariantCulture)));
+            }
+
+            if (presentation.Precision is { } precision)
+            {
+                element.Add(new XAttribute(
+                    "Precision",
+                    precision.ToString(CultureInfo.InvariantCulture)));
+            }
+
+            if (presentation.Rows is { } rows)
+            {
+                element.Add(new XAttribute(
+                    "Rows",
+                    rows.ToString(CultureInfo.InvariantCulture)));
+            }
+
+            if (presentation.MaxLength is { } maxLength)
+            {
+                element.Add(new XAttribute(
+                    "MaxLength",
+                    maxLength.ToString(CultureInfo.InvariantCulture)));
+            }
+
+            if (!string.IsNullOrEmpty(presentation.Pattern))
+            {
+                element.Add(new XAttribute("Pattern", EncodeValue(presentation.Pattern)));
+            }
+
+            foreach (var condition in presentation.VisibleWhen)
+            {
+                element.Add(new XElement(
+                    nsX + "VisibleWhen",
+                    new XAttribute("Key", EncodeValue(condition.Key)),
+                    new XAttribute("Operator", condition.RawOperator ?? condition.Operator),
+                    new XAttribute("Value", EncodeValue(condition.Value ?? string.Empty))));
             }
 
             return element;

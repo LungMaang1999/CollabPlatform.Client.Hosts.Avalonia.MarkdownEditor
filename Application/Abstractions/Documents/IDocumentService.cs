@@ -1,3 +1,4 @@
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Diagnostics;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Documents;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Application.Abstractions.Documents;
@@ -7,6 +8,18 @@ public interface IDocumentService
     MarkdownDocument? CurrentDocument { get; }
     string? CurrentFilePath { get; }
     bool HasUnsavedChanges { get; }
+
+    /// <summary>
+    /// 最近一次打开产生的诊断（当前主要是 .md.elements.xml 的损坏/跳过条目）。
+    /// 正常打开为空；文档本身始终完整解析，不是空文档。
+    /// </summary>
+    IReadOnlyList<DiagnosticMessage> CurrentLoadDiagnostics { get; }
+
+    /// <summary>
+    /// 最近一次打开产生的聚合摘要（如“3 个元素定义问题、2 处内容违规”）；
+    /// 无诊断时为 null。明细仍通过 <see cref="CurrentLoadDiagnostics"/> 获取。
+    /// </summary>
+    string? CurrentLoadDiagnosticsSummary { get; }
 
     event EventHandler<MarkdownDocument?>? CurrentDocumentChanged;
     event EventHandler<bool>? HasUnsavedChangesChanged;
@@ -41,6 +54,16 @@ public interface IDocumentService
     /// 选择配对通道）。styleXml 为 null 时等价于纯文本载入。
     /// </summary>
     Task<MarkdownDocument> OpenFromTextAsync(string markdown, string? styleXml, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 从内存 Markdown 文本载入并同时附带样式段与元素定义段（服务端文章通道）。
+    /// 定义段参与解析，决定自定义块是否按声明渲染。
+    /// </summary>
+    Task<MarkdownDocument> OpenFromTextAsync(
+        string markdown,
+        string? styleXml,
+        string? elementsXml,
+        CancellationToken cancellationToken = default);
 
     /// <summary>导出当前文档的样式包 XML；无打开文档时返回空串。</summary>
     string ExportCurrentStyleXml();

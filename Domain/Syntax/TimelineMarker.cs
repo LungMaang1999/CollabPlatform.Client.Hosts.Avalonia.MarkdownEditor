@@ -43,11 +43,27 @@ public static class TimelineMarker
     public const int MaxLineGap = 24;
     public const int DefaultLineGap = 6;
 
-    private static readonly Regex MarkerLineRegex =
-        new(@"^[ \t]{0,3}@@(?:[ \t]|$)", RegexOptions.Compiled);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (Regex Line, Regex Content)> MarkerRegexes =
+        new(StringComparer.Ordinal);
 
-    private static readonly Regex MarkerContentRegex =
-        new(@"^(?<lead>[ \t]*)@@(?<rest>(?:[ \t].*)?)$", RegexOptions.Compiled);
+    /// <summary>缺省条目标记：定义未声明 <c>item-marker</c> 时使用，与旧行为一致。</summary>
+    public const string DefaultMarker = "@@";
+
+    /// <summary>规范化条目标记：空值回落 <see cref="DefaultMarker"/>。</summary>
+    public static string NormalizeMarker(string? marker) =>
+        string.IsNullOrWhiteSpace(marker) ? DefaultMarker : marker.Trim();
+
+    private static (Regex Line, Regex Content) GetMarkerRegexes(string? marker)
+    {
+        var normalized = NormalizeMarker(marker);
+        return MarkerRegexes.GetOrAdd(normalized, static value =>
+        {
+            var escaped = Regex.Escape(value);
+            return (
+                new Regex(@"^[ \t]{0,3}" + escaped + @"(?:[ \t]|$)", RegexOptions.Compiled),
+                new Regex(@"^(?<lead>[ \t]*)" + escaped + @"(?<rest>(?:[ \t].*)?)$", RegexOptions.Compiled));
+        });
+    }
 
     private static readonly Regex TagRegex =
         new(@"\[([^\]\n]*)\]", RegexOptions.Compiled);
@@ -55,19 +71,25 @@ public static class TimelineMarker
     private static readonly Regex SideRegex =
         new(@"(?:^|\s)side=([^\s\[\]]+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    /// <summary>原始行是否为节点标记行（允许 ≤3 空格缩进，@@ 后须为空白或行尾）。</summary>
-    public static bool IsMarkerLine(string line) =>
-        !string.IsNullOrEmpty(line) && MarkerLineRegex.IsMatch(line);
+    /// <summary>原始行是否为节点标记行（允许 ≤3 空格缩进，标记后须为空白或行尾）。</summary>
+    public static bool IsMarkerLine(string line) => IsMarkerLine(line, DefaultMarker);
 
-    /// <summary>解析标记行；非 @@ 行返回 null。</summary>
-    public static TimelineMarkerInfo? TryParse(string line)
+    /// <summary>按指定标记判定；<paramref name="marker"/> 为空时回落 <see cref="DefaultMarker"/>。</summary>
+    public static bool IsMarkerLine(string line, string? marker) =>
+        !string.IsNullOrEmpty(line) && GetMarkerRegexes(marker).Line.IsMatch(line);
+
+    /// <summary>解析标记行；非标记行返回 null。</summary>
+    public static TimelineMarkerInfo? TryParse(string line) => TryParse(line, DefaultMarker);
+
+    /// <summary>按指定标记解析；<paramref name="marker"/> 为空时回落 <see cref="DefaultMarker"/>。</summary>
+    public static TimelineMarkerInfo? TryParse(string line, string? marker)
     {
         if (string.IsNullOrEmpty(line))
         {
             return null;
         }
 
-        var match = MarkerContentRegex.Match(line);
+        var match = GetMarkerRegexes(marker).Content.Match(line);
         if (!match.Success)
         {
             return null;
@@ -231,8 +253,9 @@ public static class TimelineMarker
     /// <summary>
     /// 按当前时间/标签/侧别重建整行标记文本（列 0 缩进）：
     /// <c>@@ 时间 [tag] [tag] side=left</c>，侧别为 null 时省略 side 片段。
+    /// <paramref name="marker"/> 为空时使用 <see cref="DefaultMarker"/>。
     /// </summary>
-    public static string Build(string? time, IEnumerable<string?>? tags, string? side)
+    public static string Build(string? time, IEnumerable<string?>? tags, string? side, string? marker = null)
     {
         var body = new StringBuilder();
         body.Append((time ?? string.Empty).Trim());
@@ -265,6 +288,7 @@ public static class TimelineMarker
         }
 
         var content = body.ToString().Trim();
-        return content.Length == 0 ? "@@" : "@@ " + content;
+        var effectiveMarker = NormalizeMarker(marker);
+        return content.Length == 0 ? effectiveMarker : effectiveMarker + " " + content;
     }
 }

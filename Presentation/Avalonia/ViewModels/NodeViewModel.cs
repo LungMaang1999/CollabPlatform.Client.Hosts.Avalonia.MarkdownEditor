@@ -105,7 +105,25 @@ public sealed class NodeViewModel : INotifyPropertyChanged
         }
     }
 
+    private bool _isOutlineExpanded;
+
+    /// <summary>
+    /// 大纲树展开状态：默认折叠，仅由用户点击行首箭头改变（双向绑定到 TreeViewItem.IsExpanded）。
+    /// 实例在编辑期间由 SyncTo 复用，故同一文档内保持；切换文档时树节点重建，自动回到折叠。
+    /// </summary>
+    public bool IsOutlineExpanded
+    {
+        get => _isOutlineExpanded;
+        set
+        {
+            if (_isOutlineExpanded == value) return;
+            _isOutlineExpanded = value;
+            OnPropertyChanged();
+        }
+    }
+
     public event Action<MarkdownNode, NodeStyle>? StyleCommitRequested;
+
 
     /// <summary>属性面板提交块参数（如图标）时触发，由编辑器包装成可撤销命令。</summary>
     public event Action<MarkdownNode, string, string?>? AttributeCommitRequested;
@@ -529,7 +547,11 @@ public sealed class NodeViewModel : INotifyPropertyChanged
         if (oldNode.Type != newNode.Type)
             OnPropertyChanged(nameof(Type));
         if (!string.Equals(oldNode.Text, newNode.Text, StringComparison.Ordinal))
+        {
             OnPropertyChanged(nameof(Text));
+            // 大纲树绑 DisplayText，摘要随 Text 变化时必须一起通知，否则重解析后树里仍是旧文案。
+            OnPropertyChanged(nameof(DisplayText));
+        }
         if (!Nullable.Equals(oldNode.Level, newNode.Level))
             OnPropertyChanged(nameof(Level));
         if (!string.Equals(oldNode.StyleId, newNode.StyleId, StringComparison.Ordinal))
