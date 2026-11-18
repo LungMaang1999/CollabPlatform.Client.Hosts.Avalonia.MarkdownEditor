@@ -84,7 +84,11 @@
 
   <element id="builtin-code-block" applies-to="CodeBlock">
     <structure>
-      <part slot="root" addressable="false" tag="pre">
+      <!-- suppress-node-style="true"：代码块根容器 <pre> 不输出用户设置的 inline style（color/font-family 等），
+           避免 inline style 高特异性压盖 Prism .token.* 的 class token 颜色。
+           代码块布局（背景/边距/圆角/字体族）由 PreviewCss 中 .code-block 选择器统一控制，
+           语法着色由前端 Prism.js 的 CSS 生效。若用户显式设了背景色/边距，应通过 CSS 变量透传而非 inline。 -->
+      <part slot="root" addressable="false" tag="pre" suppress-node-style="true">
         <part slot="content" role="content" addressable="false" tag="code" class-recipe="language" content="code-block"/>
       </part>
     </structure>
