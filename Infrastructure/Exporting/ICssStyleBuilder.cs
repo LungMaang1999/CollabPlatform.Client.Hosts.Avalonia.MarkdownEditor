@@ -112,11 +112,16 @@ public sealed class CssStyleBuilder : ICssStyleBuilder
 
         if (!string.IsNullOrWhiteSpace(foregroundColor))
         {
-            // 同步输出 --node-color：古诗等"叶子块"内部 HTML 无独立 AST 节点，
-            // 其内部规则通过 var(--node-color, 语义默认色) 取色。未显式设色时
-            // 变量不存在，内部回退到分层灰阶；设色后统一为用户所选墨色。
+            // 只输出 --node-color CSS 变量，不输出 inline color: 声明。
+            // 宿主 CSS 统一通过 var(--node-color, 语义默认色) 消费颜色：
+            //   pre { color: var(--node-color, var(--color-code-text)) }
+            //   a   { color: var(--node-color, var(--color-primary)) }
+            // 这样做的关键收益是：Prism token span（.token.keyword { color: #07a }）
+            // 的类选择器特异性（0,0,2,0）高于宿主 pre 的类选择器（0,0,0,1），
+            // 语法着色能正常生效；如果这里再写 inline color:（特异性 1,0,0,0），
+            // 会把 Prism token 颜色全部压掉，只剩父元素单一文字色。
+            // 古诗等"叶子块"内部 HTML 无独立 AST 节点，同样靠 var(--node-color) 取色。
             sb.Append("--node-color: ").Append(foregroundColor).Append("; ");
-            sb.Append("color: ").Append(foregroundColor).Append("; ");
         }
 
         if (!string.IsNullOrWhiteSpace(backgroundColor))
