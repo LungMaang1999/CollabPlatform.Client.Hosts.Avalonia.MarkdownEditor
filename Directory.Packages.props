@@ -1,0 +1,23 @@
+<Project>
+  <!-- https://learn.microsoft.com/en-us/nuget/consume-packages/central-package-management -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 版本号与 CollabPlatform.Client.Hosts.Avalonia/Directory.Packages.props 保持一致 -->
+    <PackageVersion Include="Avalonia" Version="12.1.6" />
+    <PackageVersion Include="Markdig" Version="1.6.0" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0" />
+    <PackageVersion Include="Net.Codecrete.QrCodeGenerator" Version="3.2.1" />
+    <!-- AvaloniaEdit / TextMate 系列 -->
+    <PackageVersion Include="Avalonia.AvaloniaEdit" Version="12.0.0" />
+    <PackageVersion Include="AvaloniaEdit.TextMate" Version="12.0.0" />
+    <PackageVersion Include="TextMateSharp.Grammars" Version="2.0.4" />
+    <!-- 测试 -->
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
+    <PackageVersion Include="coverlet.collector" Version="10.1.0" />
+    <PackageVersion Include="Avalonia.Headless" Version="12.1.6" />
+    <PackageVersion Include="Avalonia.Headless.XUnit" Version="12.1.6" />
+  </ItemGroup>
+</Project>

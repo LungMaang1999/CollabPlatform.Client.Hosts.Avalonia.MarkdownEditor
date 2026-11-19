@@ -8,10 +8,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Avalonia" Version="12.1.6" />
-    <PackageReference Include="Markdig" Version="1.6.0" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="11.0.0" />
-    <PackageReference Include="Net.Codecrete.QrCodeGenerator" Version="3.2.1" />
+    <PackageReference Include="Avalonia" />
+    <PackageReference Include="Markdig" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Net.Codecrete.QrCodeGenerator" />
   </ItemGroup>
 
   <ItemGroup>
