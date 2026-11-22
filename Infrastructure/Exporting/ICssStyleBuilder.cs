@@ -9,12 +9,20 @@ public interface ICssStyleBuilder
 {
     string Build(ComputedStyle? style);
 
+    /// <summary>
+    /// <paramref name="emitInlineColor"/> 仅在节点自身显式设了前景色时为 true：
+    /// 此时除 --node-color 外再输出 inline color:；类型/继承来的颜色只输出变量，避免压掉 Prism token 颜色。
+    /// </summary>
+    string Build(ComputedStyle? style, bool emitInlineColor);
+
     string Build(NodeStyle? style);
 }
 
 public sealed class CssStyleBuilder : ICssStyleBuilder
 {
-    public string Build(ComputedStyle? style)
+    public string Build(ComputedStyle? style) => Build(style, emitInlineColor: false);
+
+    public string Build(ComputedStyle? style, bool emitInlineColor)
     {
         if (style is null) return string.Empty;
 
@@ -22,6 +30,7 @@ public sealed class CssStyleBuilder : ICssStyleBuilder
             fontFamily: style.FontFamily,
             fontSize: style.FontSize,
             foregroundColor: style.ForegroundColor,
+            emitInlineColor: emitInlineColor,
             backgroundColor: style.BackgroundColor,
             bold: style.Bold,
             italic: style.Italic,
@@ -52,6 +61,7 @@ public sealed class CssStyleBuilder : ICssStyleBuilder
             fontFamily: style.FontFamily,
             fontSize: style.FontSize,
             foregroundColor: style.ForegroundColor,
+            emitInlineColor: false,
             backgroundColor: style.BackgroundColor,
             bold: style.Bold,
             italic: style.Italic,
@@ -78,6 +88,7 @@ public sealed class CssStyleBuilder : ICssStyleBuilder
         string? fontFamily,
         double? fontSize,
         string? foregroundColor,
+        bool emitInlineColor,
         string? backgroundColor,
         bool? bold,
         bool? italic,
@@ -112,16 +123,15 @@ public sealed class CssStyleBuilder : ICssStyleBuilder
 
         if (!string.IsNullOrWhiteSpace(foregroundColor))
         {
-            // 只输出 --node-color CSS 变量，不输出 inline color: 声明。
-            // 宿主 CSS 统一通过 var(--node-color, 语义默认色) 消费颜色：
-            //   pre { color: var(--node-color, var(--color-code-text)) }
-            //   a   { color: var(--node-color, var(--color-primary)) }
-            // 这样做的关键收益是：Prism token span（.token.keyword { color: #07a }）
-            // 的类选择器特异性（0,0,2,0）高于宿主 pre 的类选择器（0,0,0,1），
-            // 语法着色能正常生效；如果这里再写 inline color:（特异性 1,0,0,0），
-            // 会把 Prism token 颜色全部压掉，只剩父元素单一文字色。
-            // 古诗等"叶子块"内部 HTML 无独立 AST 节点，同样靠 var(--node-color) 取色。
+            // 只输出 --node-color CSS 变量；宿主 CSS 统一通过 var(--node-color, 语义默认色) 取色。
+            // 类型样式/继承来的颜色不写 inline color:，否则其特异性（1,0,0,0）会压掉
+            // Prism token span（.token.keyword，0,0,2,0）的语法着色。
+            // 仅当节点自身显式设了前景色时才补 inline color:，用于叶子文本的直接覆盖。
             sb.Append("--node-color: ").Append(foregroundColor).Append("; ");
+            if (emitInlineColor)
+            {
+                sb.Append("color: ").Append(foregroundColor).Append("; ");
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(backgroundColor))

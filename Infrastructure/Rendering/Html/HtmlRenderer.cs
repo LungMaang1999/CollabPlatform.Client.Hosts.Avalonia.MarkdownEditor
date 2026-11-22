@@ -5038,17 +5038,17 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         // SVG 坐标系：根据 size 选项选择 viewBox/圆心/半径，四周留标签空间。
         var sizeAttr = GetAttribute(node, "radar-size");
         var size = string.IsNullOrWhiteSpace(sizeAttr) ? RadarMarker.SizeMedium : sizeAttr.Trim();
-        var (vbW, vbH, cx, cy, r) = RadarMarker.SizeGeometry(size);
+        var (viewBox, cx, cy, r) = RadarMarker.SizeGeometry(size);
         const int gridLevels = 5;
 
         html.Append("<div class=\"md-radar-chart\">")
             .Append("<svg class=\"md-radar-svg\" width=\"")
-            .Append(vbW.ToString(CultureInfo.InvariantCulture))
+            .Append(viewBox.ToString(CultureInfo.InvariantCulture))
             .Append("\" height=\"")
-            .Append(vbH.ToString(CultureInfo.InvariantCulture))
+            .Append(viewBox.ToString(CultureInfo.InvariantCulture))
             .Append("\" viewBox=\"0 0 ")
-            .Append(vbW.ToString(CultureInfo.InvariantCulture)).Append(' ')
-            .Append(vbH.ToString(CultureInfo.InvariantCulture))
+            .Append(viewBox.ToString(CultureInfo.InvariantCulture)).Append(' ')
+            .Append(viewBox.ToString(CultureInfo.InvariantCulture))
             .Append("\" role=\"img\"");
 
         if (title.Length > 0)
@@ -5324,7 +5324,9 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
 
     private string? BuildNodeInlineCss(MarkdownNode node, string? extraCss)
     {
-        var css = _cssStyleBuilder.Build(_styleResolver.Resolve(node));
+        // 只有节点自身显式设了前景色才补 inline color:；类型/继承来的颜色只输出 --node-color。
+        var emitInlineColor = !string.IsNullOrWhiteSpace(node.LocalStyle.ForegroundColor);
+        var css = _cssStyleBuilder.Build(_styleResolver.Resolve(node), emitInlineColor);
         if (!string.IsNullOrWhiteSpace(extraCss))
         {
             css = string.IsNullOrWhiteSpace(css) ? extraCss.Trim() : css + " " + extraCss.Trim();

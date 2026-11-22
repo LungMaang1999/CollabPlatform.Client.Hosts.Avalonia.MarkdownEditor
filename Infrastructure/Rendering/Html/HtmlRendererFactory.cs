@@ -63,13 +63,15 @@ internal sealed class PreviewCssStyleBuilder : ICssStyleBuilder
         _inner = inner ?? new CssStyleBuilder();
     }
 
-    public string Build(ComputedStyle? style)
+    public string Build(ComputedStyle? style) => Build(style, emitInlineColor: false);
+
+    public string Build(ComputedStyle? style, bool emitInlineColor)
     {
         if (style is null) return string.Empty;
 
         var copy = new ComputedStyle(style);
         StripDefaultBaseline(copy);
-        return _inner.Build(copy);
+        return _inner.Build(copy, emitInlineColor);
     }
 
     public string Build(NodeStyle? style)
