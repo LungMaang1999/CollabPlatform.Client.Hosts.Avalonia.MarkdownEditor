@@ -148,6 +148,10 @@ public sealed class MarkdownParser : IMarkdownParser
         // 行内 parser（行内公式 / 代码段）只有这一个注册入口，与影子管线共用，次序一致。
         InlineParserRegistration.Apply(pipelineBuilder, _options);
 
+        // 带中间文字的分割线 `--- 文本 ---`：必须在 ThematicBreakParser 之前看到同一行；
+        // 标签为空时 TryOpen 返回 None，普通 `---` 的输出与解析结果保持原样。
+        pipelineBuilder.BlockParsers.Insert(0, new DividerParser());
+
         // 解析声明的唯一装载路径：内置数据面（builtin-elements.xml）与文档定义先合并，
         // 再同时喂给关键字表与条目标记表。内置与用户不是两套入口，差别只在合并顺序：
         // 文档定义在前（同目标同变体时优先），内置声明补足缺省。
@@ -1931,8 +1935,11 @@ public sealed class MarkdownParser : IMarkdownParser
     {
         try
         {
+            // 引用式注释（[//]: # ... / [comment]: # ...）不能打断段落，
+            // 紧贴正文书写时会被 Markdig 当段落文字；这里先整行遮蔽再解析。
+            // 等长空格不改变偏移与行数，document.SourceMarkdown 仍是原始源码。
             return ParsedDocumentPipeline.ParseAndConvert(
-                source,
+                ReferenceCommentMasker.Mask(source),
                 runtime.Pipeline,
                 runtime.Converter,
                 runtime.Registry,

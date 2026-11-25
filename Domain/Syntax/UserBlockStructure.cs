@@ -203,7 +203,7 @@ public sealed record UserBlockPart
     public string? Css { get; init; }
 
     /// <summary>
-    /// schema v3 命名条件类名配方：<c>class-recipe="language|kind|mermaid-state|matrix-state|qrcode-state|radar-state"</c>。
+    /// schema v3 命名条件类名配方：<c>class-recipe="language|kind|mermaid-state|matrix-state|qrcode-state|radar-state|divider-line-state"</c>。
     /// </summary>
     public string? ClassRecipe { get; init; }
 
@@ -546,7 +546,7 @@ public static class UserBlockStructureRules
         {
             "language", "kind", "mermaid-state", "matrix-state", "qrcode-state", "radar-state",
             "poem-state", "timeline-time-state", "admonition-kind", "kind-minimal", "timeline-layout",
-            "collapse-state", "tocpic-state", "color-block-state",
+            "collapse-state", "tocpic-state", "color-block-state", "divider-line-state",
         };
 
     /// <summary>schema v3 显式属性绑定允许的输出属性名（无事件、无内联样式、无类名通道）。</summary>

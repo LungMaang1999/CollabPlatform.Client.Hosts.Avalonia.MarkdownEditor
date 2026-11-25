@@ -101,6 +101,22 @@
     </structure>
   </element>
 
+  <!-- 中间带文字的分割线：两侧细线 + 中间文字/表情/符号；
+       线型由 class-recipe 按节点派生属性 divider-line 切换，样式令牌全部来自预览层 CSS。 -->
+  <element id="builtin-divider" applies-to="Divider">
+    <structure slots="line-start,label,line-end">
+      <part slot="root" addressable="false" tag="div" class="md-divider"
+            class-recipe="divider-line-state">
+        <part slot="line-start" role="wrapper" addressable="false" tag="span"
+              class="md-divider-rule" attr="literal:true@aria-hidden"/>
+        <part slot="label" role="content" addressable="false" tag="span"
+              class="md-divider-label" emit-node-style="true" content="text"/>
+        <part slot="line-end" role="wrapper" addressable="false" tag="span"
+              class="md-divider-rule" attr="literal:true@aria-hidden"/>
+      </part>
+    </structure>
+  </element>
+
   <!-- ── 表格 ────────────────────────────────────────────────── -->
   <element id="builtin-table" applies-to="Table">
     <structure>

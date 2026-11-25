@@ -45,6 +45,9 @@ public static class ShadowSyntaxTakeover
         // 与生产 CreateRuntime 共用同一个行内注册入口，两边次序不可能分叉。
         InlineParserRegistration.Apply(builder, options);
 
+        // 与生产同序：带中间文字的分割线在 ThematicBreakParser 之前；标签为空时交还原生分割线。
+        builder.BlockParsers.Insert(0, new DividerParser());
+
         // 与生产 CreateRuntime 同一份数据：内置数据面与文档定义合并后重建关键字表，
         // 块类型走块工厂表。
         var declarations = MarkdownParser.MergeBuiltInDeclarations(

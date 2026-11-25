@@ -1593,6 +1593,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         NodeType.Paragraph,
         NodeType.LineBreak,
         NodeType.ThematicBreak,
+        NodeType.Divider,
         NodeType.FootnoteGroup,
         NodeType.UnorderedList,
         NodeType.OrderedList,
@@ -2516,6 +2517,12 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         "collapse-state" => node => node.Attributes.ContainsKey(MarkdownAttributes.Unclosed) ? "md-block-pending" : null,
         "tocpic-state" => node => node.Attributes.ContainsKey(MarkdownAttributes.Unclosed) ? "md-block-pending" : null,
         "color-block-state" => node => node.Attributes.ContainsKey(MarkdownAttributes.Unclosed) ? "md-block-pending" : null,
+        "divider-line-state" => node => string.Equals(
+            GetAttribute(node, DividerSyntax.LineAttribute),
+            DividerSyntax.LineDashed,
+            StringComparison.OrdinalIgnoreCase)
+            ? "md-divider--dashed"
+            : null,
         _ => null,
     };
 

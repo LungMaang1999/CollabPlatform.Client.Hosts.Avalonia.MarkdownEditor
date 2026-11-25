@@ -46,7 +46,10 @@ internal static class ParsedDocumentPipeline
         MarkdownDocument document;
         try
         {
-            document = ParseEnriched(source, pipeline, userBlocks);
+            // 多引用/转义脚的写法 Markdig 原生解析会切碎或漏字，先按等长占位符遮蔽再解析；
+            // 转换仍用原始源码取 RawMarkdown，保证增量拼接与源码回读拿到的是用户原文。
+            var parseSource = FootnoteReferencePreprocessor.Prepare(source);
+            document = ParseEnriched(parseSource, pipeline, userBlocks);
             return converter.ConvertBlocks(document, diagnostics, source);
         }
         catch (ParsedDocumentException)

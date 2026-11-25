@@ -75,5 +75,6 @@ public enum NodeType
     Spoiler,
     Tocpic,
     ColorChip,
-    ColorBlock
+    ColorBlock,
+    Divider
 }

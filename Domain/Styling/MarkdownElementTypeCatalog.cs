@@ -62,6 +62,9 @@ public static class MarkdownElementTypeCatalog
             "第一行  \n第二行", "硬换行，行尾两个空格或反斜杠产生。"),
         new(NodeType.ThematicBreak, "分割线", CategoryStructure, ElementRenderMode.Visible, true,
             "---", "分隔线。"),
+        new(NodeType.Divider, "文本分割线", CategoryStructure, ElementRenderMode.Visible, true,
+            "--- 文本 ---\n\n--- 虚线 --- {line=dashed}",
+            "中间带文字/表情/符号的分割线，两侧细线；尾部 {line=dashed} 切换虚线。"),
         new(NodeType.YamlFrontMatter, "元数据", CategoryStructure, ElementRenderMode.Hidden, false,
             "---\ntitle: 示例\n---", "YAML 前言，只参与元数据解析，不进入正文渲染。"),
 

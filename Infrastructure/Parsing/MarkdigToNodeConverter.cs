@@ -5,6 +5,7 @@ using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax.Factories;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.SyntaxTakeover;
 using System.Text;
+using System.Text.RegularExpressions;
 using Markdig.Extensions.Footnotes;
 using Markdig.Extensions.Mathematics;
 using Markdig.Extensions.Tables;
@@ -24,6 +25,9 @@ public sealed class MarkdigToNodeConverter
     private readonly FenceKeywordRegistry _fenceKeywords;
     private readonly InlineHtmlPolicy? _inlineHtml;
     private readonly InlineHtmlPolicy? _blockHtml;
+
+    // 本次转换可见的脚注定义（标签 → 定义块），用于展开 [^1,2] 这类多引用。
+    private readonly Dictionary<string, Footnote> _footnotesByLabel = new(StringComparer.OrdinalIgnoreCase);
 
     public MarkdigToNodeConverter(
         NodeFactory? nodeFactory = null,
@@ -59,14 +63,36 @@ public sealed class MarkdigToNodeConverter
                 "Markdig 文档未经 ParsedDocumentPipeline 的解析侧标记，禁止直接转换；请改走 ParsedDocumentPipeline.ParseAndConvert。");
         }
 
+        CollectFootnoteDefinitions(rootContainer);
         var resultNodes = ConvertChildren(rootContainer, diagnostics, source);
+
+        // 预处理器为让定义进入 FootnoteGroup 追加的隐藏引用段落只用于解析，
+        // 不进文档树，否则会多出可见段落与多余回链。
+        resultNodes.RemoveAll(IsHiddenFootnoteCarrier);
 
         foreach (var node in resultNodes)
         {
             PopulateRawMarkdown(node, source);
         }
 
+        // 脚注角标锚点与回链要覆盖「Markdig 原生引用 + 逗号展开出来的引用」，
+        // 统一在整棵转换完成后按文档顺序编号，避免两套编号互相撞号。
+        AssignFootnoteAnchors(resultNodes);
+
         return resultNodes;
+    }
+
+    private static bool IsHiddenFootnoteCarrier(MarkdownNode node)
+    {
+        if (node.Type != NodeType.Paragraph || node.Children.Count == 0)
+        {
+            return false;
+        }
+
+        var first = node.Children[0];
+        return first.Type == NodeType.Text
+            && first.Text is { Length: > 0 } text
+            && text[0] == FootnoteReferencePreprocessor.HiddenMarker;
     }
 
     private List<MarkdownNode> ConvertChildren(
@@ -411,19 +437,6 @@ public sealed class MarkdigToNodeConverter
                         footnoteNode.SetDerivedAttribute("slug", slug);
                         footnoteNode.SetDerivedAttribute("id", "fn-" + slug);
 
-                        var backrefAnchors = new StringBuilder();
-                        for (var linkIndex = 0; linkIndex < footnoteBlock.Links.Count; linkIndex++)
-                        {
-                            if (linkIndex > 0)
-                            {
-                                backrefAnchors.Append(',');
-                            }
-
-                            backrefAnchors.Append(BuildFootnoteRefAnchor(slug, linkIndex));
-                        }
-
-                        footnoteNode.SetDerivedAttribute("backrefs", backrefAnchors.ToString());
-
                         var children = ConvertChildren(footnoteBlock, diagnostics, source);
                         foreach (var child in children)
                         {
@@ -576,6 +589,21 @@ public sealed class MarkdigToNodeConverter
                     PopulateHtmlBlock(node, htmlText, range, diagnostics);
 
                     return node;
+                }
+
+            case DividerBlock dividerBlock:
+                {
+                    var dividerNode = _nodeFactory.Create(
+                        NodeType.Divider,
+                        NodeCategory.Leaf,
+                        text: dividerBlock.Label,
+                        range: range);
+
+                    dividerNode.SetDerivedAttribute(DividerSyntax.TextAttribute, dividerBlock.Label);
+                    dividerNode.SetDerivedAttribute(
+                        DividerSyntax.LineAttribute,
+                        dividerBlock.Dashed ? DividerSyntax.LineDashed : DividerSyntax.LineSolid);
+                    return dividerNode;
                 }
 
             case ThematicBreakBlock:
@@ -1077,17 +1105,8 @@ public sealed class MarkdigToNodeConverter
                         var footnote = footnoteLink.Footnote;
                         var label = ExtractFootnoteLabel(footnote.Label);
                         var slug = BuildFootnoteSlug(label, footnote.Order);
-                        var occurrence = footnote.Links.IndexOf(footnoteLink);
-                        if (occurrence < 0)
-                        {
-                            occurrence = 0;
-                        }
 
-                        var anchor = BuildFootnoteRefAnchor(slug, occurrence);
-
-                        linkNode.SetDerivedAttribute("id", anchor);
                         linkNode.SetDerivedAttribute("href", "#fn-" + slug);
-                        linkNode.SetDerivedAttribute("anchor", anchor);
                         linkNode.SetDerivedAttribute("slug", slug);
                         linkNode.Text = label;
 
@@ -1130,6 +1149,10 @@ public sealed class MarkdigToNodeConverter
         }
 
         CloseUnclosedInlineHtml(openTags, diagnostics, InlineScope);
+
+        // Markdig 会把 [^1,2] 里的 '^' 当成上标分隔符切成多个文字片段，
+        // 必须在行内序列回落成节点后再合并识别，否则单看一个片段永远匹配不到。
+        NormalizeFootnoteReferences(parentNode);
     }
 
     /// <summary>行内 HTML 放行标签的栈条目：标签名与它对应的容器节点。</summary>
@@ -1920,11 +1943,248 @@ public sealed class MarkdigToNodeConverter
         return label.Length > 0 ? label : "note";
     }
 
+    // [^1,2] / [^1][^2] 经预处理器遮蔽成占位符后按这里还原；
+    // 转义写法 \[\^ 也被换成占位符，命中后还原成字面量 "["，不生成引用。
+    private static readonly Regex FootnoteSegmentPattern = new(
+        "(?<escape>\uE004\uE005)|\\[\\^(?<label>[^\\[\\]\\r\\n]+)\\]",
+        RegexOptions.Compiled);
+
+    private void CollectFootnoteDefinitions(ContainerBlock container)
+    {
+        _footnotesByLabel.Clear();
+        Walk(container);
+
+        void Walk(ContainerBlock current)
+        {
+            foreach (var block in current)
+            {
+                if (block is FootnoteGroup group)
+                {
+                    foreach (var item in group)
+                    {
+                        if (item is Footnote footnote)
+                        {
+                            _footnotesByLabel[ExtractFootnoteLabel(footnote.Label)] = footnote;
+                        }
+                    }
+
+                    // 脚注区内部是脚注正文，不再当作容器继续找脚注定义。
+                    continue;
+                }
+
+                if (block is ContainerBlock nested)
+                {
+                    Walk(nested);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 合并相邻文字节点后识别脚注引用：Markdig 只认单个已定义标签，
+    /// 逗号写法 <c>[^1,2]</c> 会按 '^' 切成多段文字；这里合并回原样再拆分。
+    /// </summary>
+    private void NormalizeFootnoteReferences(MarkdownNode parent)
+    {
+        var index = 0;
+        while (index < parent.Children.Count)
+        {
+            if (parent.Children[index].Type != NodeType.Text)
+            {
+                index++;
+                continue;
+            }
+
+            var end = index;
+            var text = new StringBuilder();
+            while (end < parent.Children.Count && parent.Children[end].Type == NodeType.Text)
+            {
+                text.Append(parent.Children[end].Text);
+                end++;
+            }
+
+            var merged = text.ToString();
+            if (!NeedsFootnoteNormalization(merged))
+            {
+                index = end;
+                continue;
+            }
+
+            var firstRange = parent.Children[index].Range;
+            var lastRange = parent.Children[end - 1].Range;
+            var range = firstRange with
+            {
+                Length = Math.Max(0, lastRange.EndOffset - firstRange.StartOffset),
+                EndLine = lastRange.EndLine,
+                EndColumn = lastRange.EndColumn
+            };
+
+            var replacement = new List<MarkdownNode>();
+            BuildFootnoteSegment(merged, range, replacement);
+
+            for (var k = end - 1; k >= index; k--)
+            {
+                parent.RemoveChild(parent.Children[k]);
+            }
+
+            for (var k = 0; k < replacement.Count; k++)
+            {
+                parent.InsertChild(index + k, replacement[k]);
+            }
+
+            index += replacement.Count;
+        }
+    }
+
+    private static bool NeedsFootnoteNormalization(string text) =>
+        text.Contains("[^", StringComparison.Ordinal)
+        || text.Contains(FootnoteReferencePreprocessor.OpenMarker)
+        || text.Contains(FootnoteReferencePreprocessor.EscapedBackslashMarker)
+        || text.Contains(FootnoteReferencePreprocessor.HiddenMarker);
+
+    private void BuildFootnoteSegment(string text, SourceRange range, List<MarkdownNode> output)
+    {
+        // 占位符还原成原始定界符；转义占位符保留到匹配阶段输出字面量。
+        var normalized = text
+            .Replace(
+                string.Concat(
+                    FootnoteReferencePreprocessor.OpenMarker,
+                    FootnoteReferencePreprocessor.CaretMarker),
+                "[^",
+                StringComparison.Ordinal)
+            .Replace(
+                FootnoteReferencePreprocessor.CloseMarker.ToString(),
+                "]",
+                StringComparison.Ordinal);
+
+        var index = 0;
+        foreach (Match match in FootnoteSegmentPattern.Matches(normalized))
+        {
+            AppendText(normalized[index..match.Index]);
+
+            if (match.Groups["escape"].Success)
+            {
+                // \[^x] 是转义写法：只还原方括号，后面 ^x] 原样当文字。
+                AppendText("[");
+                index = match.Index + match.Length;
+                continue;
+            }
+
+            foreach (var rawLabel in match.Groups["label"].Value.Split(','))
+            {
+                var label = rawLabel.Trim();
+                if (label.Length == 0)
+                {
+                    continue;
+                }
+
+                if (_footnotesByLabel.TryGetValue(label, out var footnote))
+                {
+                    // 显示文本统一取定义块的原始标签，大小写与书写不一致时以定义为准。
+                    var display = ExtractFootnoteLabel(footnote.Label);
+                    var slug = BuildFootnoteSlug(display, footnote.Order);
+                    var linkNode = _nodeFactory.Create(
+                        NodeType.FootnoteLink,
+                        NodeCategory.Inline,
+                        range: range);
+
+                    linkNode.SetDerivedAttribute("href", "#fn-" + slug);
+                    linkNode.SetDerivedAttribute("slug", slug);
+                    linkNode.Text = display;
+                    output.Add(linkNode);
+                }
+                else
+                {
+                    // 定义不存在：不露出 [^x] 原样，退成普通上标文字（不可点击）。
+                    var fallback = _nodeFactory.Create(
+                        NodeType.Superscript,
+                        NodeCategory.Inline,
+                        range: range);
+                    fallback.AddChild(
+                        _nodeFactory.Create(
+                            NodeType.Text,
+                            NodeCategory.Inline,
+                            text: label,
+                            range: range));
+                    output.Add(fallback);
+                }
+            }
+
+            index = match.Index + match.Length;
+        }
+
+        AppendText(normalized[index..]);
+
+        void AppendText(string segment)
+        {
+            if (segment.Length == 0)
+            {
+                return;
+            }
+
+            output.Add(
+                _nodeFactory.Create(
+                    NodeType.Text,
+                    NodeCategory.Inline,
+                    text: segment,
+                    range: range));
+        }
+    }
+
+    // 统一给所有正文脚注引用编号（含逗号展开出来的引用），并把每处锚点写回
+    // 对应脚注条目的 backrefs；按文档顺序编号，返回链接与正文顺序一致。
+    private static void AssignFootnoteAnchors(List<MarkdownNode> nodes)
+    {
+        var anchorsBySlug = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        var occurrences = new Dictionary<string, int>(StringComparer.Ordinal);
+        var footnotes = new List<(MarkdownNode Node, string Slug)>();
+
+        Walk(nodes);
+
+        foreach (var (node, slug) in footnotes)
+        {
+            node.SetDerivedAttribute(
+                "backrefs",
+                anchorsBySlug.TryGetValue(slug, out var anchors) ? string.Join(',', anchors) : string.Empty);
+        }
+
+        void Walk(IEnumerable<MarkdownNode> children)
+        {
+            foreach (var node in children)
+            {
+                if (node.Type == NodeType.FootnoteLink
+                    && node.Attributes.TryGetValue("slug", out var slug))
+                {
+                    occurrences.TryGetValue(slug, out var occurrence);
+                    occurrences[slug] = occurrence + 1;
+
+                    var anchor = BuildFootnoteRefAnchor(slug, occurrence);
+                    node.SetDerivedAttribute("id", anchor);
+                    node.SetDerivedAttribute("anchor", anchor);
+
+                    if (!anchorsBySlug.TryGetValue(slug, out var anchors))
+                    {
+                        anchors = new List<string>();
+                        anchorsBySlug[slug] = anchors;
+                    }
+
+                    anchors.Add(anchor);
+                }
+                else if (node.Type == NodeType.Footnote
+                    && node.Attributes.TryGetValue("slug", out var footnoteSlug))
+                {
+                    footnotes.Add((node, footnoteSlug));
+                }
+
+                Walk(node.Children);
+            }
+        }
+    }
+
     // 锚点 slug：Unicode 单词字符（含数字、CJK）与 '-' 保留，其余字符统一
     // 替换为 '-'；发生过替换时追加脚注 Order 后缀以防不同标签撞 slug。
     // 纯单词标签（绝大多数场景）无损直用。
-    private static string BuildFootnoteSlug(string label, int order)
-    {
+    private static string BuildFootnoteSlug(string label, int order)    {
         var slug = new StringBuilder(label.Length);
         var replaced = false;
         foreach (var ch in label)
