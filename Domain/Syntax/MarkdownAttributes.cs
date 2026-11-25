@@ -55,6 +55,9 @@ public static class MarkdownAttributes
         "timeline-line",
         "timeline-gap",
         "timeline-sort",
+        // 标题锚点：slug 与同名角标序号都由解析器按当前源码派生，不能从旧树继承。
+        "slug",
+        "anchor-index",
         // 雷达图参数：解析器仅在非默认值时落盘，必须视为派生键，
         // 否则改回默认值（如 labels=hide）后旧值会被当自定义属性继承回来。
         "radar-title",

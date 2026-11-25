@@ -191,6 +191,45 @@ public sealed class MarkdigToNodeConverter
                     return quoteNode;
                 }
 
+            case CollapseBlock collapseBlock:
+                {
+                    var collapseNode = _nodeFactory.Create(
+                        NodeType.Collapse,
+                        NodeCategory.Container,
+                        range: range);
+
+                    var collapseTitle = string.IsNullOrWhiteSpace(collapseBlock.Title)
+                        ? "详细信息"
+                        : collapseBlock.Title.Trim();
+                    collapseNode.SetDerivedAttribute("collapse-title", collapseTitle);
+                    collapseNode.Text = collapseTitle;
+
+                    var collapseChildren = ConvertChildren(collapseBlock, diagnostics, source);
+                    foreach (var child in collapseChildren)
+                    {
+                        collapseNode.AddChild(child);
+                    }
+
+                    return collapseNode;
+                }
+
+            case TocpicBlock tocpicBlock:
+                {
+                    var tocpicNode = _nodeFactory.Create(
+                        NodeType.Tocpic,
+                        NodeCategory.Container,
+                        range: range);
+
+                    var tocpicChildren = ConvertChildren(tocpicBlock, diagnostics, source);
+                    foreach (var child in tocpicChildren)
+                    {
+                        tocpicNode.AddChild(child);
+                    }
+
+                    tocpicNode.Text = GetInlineText(tocpicNode);
+                    return tocpicNode;
+                }
+
             case Table tableBlock:
                 var tableNode = _nodeFactory.Create(
                     NodeType.Table,
@@ -254,6 +293,19 @@ public sealed class MarkdigToNodeConverter
                         cellNode.Text = GetInlineText(cellNode);
                         rowNode.AddChild(cellNode);
                         colIndex++;
+                    }
+
+                    // 表格行内的裸 `||` 会先被表格切成空单元格，剧透无法成立。
+                    // 这里只提示、不改写原文：改写会改变作者声明的列数。
+                    if (!rowBlock.IsHeader
+                        && rowNode.Children.Any(cell => string.IsNullOrEmpty(cell.Text)))
+                    {
+                        diagnostics.Add(new DiagnosticMessage
+                        {
+                            Severity = DiagnosticSeverity.Warning,
+                            Code = "SPOILER_PIPE_IN_TABLE",
+                            Message = "表格行内的裸 `||` 已按列分隔处理；如需剧透请写成 `\\|\\|内容\\|\\|`。",
+                        });
                     }
 
                     tableNode.AddChild(rowNode);
@@ -350,6 +402,13 @@ public sealed class MarkdigToNodeConverter
             case RadarBlock radarBlock:
                 return BuildRadar(radarBlock, range);
 
+            case ColorBlock colorBlock:
+                return _nodeFactory.Create(
+                    NodeType.ColorBlock,
+                    NodeCategory.Block,
+                    text: colorBlock.Lines.ToString().TrimEnd('\r', '\n'),
+                    range: range);
+
             case FencedCodeBlock codeBlock:
                 {
                     var codeText = codeBlock.Lines.ToString();
@@ -430,6 +489,10 @@ public sealed class MarkdigToNodeConverter
                         text: yamlText,
                         range: range);
                 }
+
+            case HtmlBlock htmlBlock when htmlBlock.Type == HtmlBlockType.Comment:
+                // 注释不是内容：整块丢弃，源码仍保留在编辑区。
+                return null;
 
             case HtmlBlock htmlBlock:
                 {
@@ -809,7 +872,35 @@ public sealed class MarkdigToNodeConverter
                         break;
                     }
 
+                case SpoilerInline spoiler:
+                    {
+                        var spoilerNode = _nodeFactory.Create(
+                            NodeType.Spoiler,
+                            NodeCategory.Inline,
+                            range: range);
+                        ProcessInlines(spoiler, spoilerNode, diagnostics);
+                        activeParent.AddChild(spoilerNode);
+                        break;
+                    }
+
                 case CodeInline code:
+                    if (ColorValueParser.TryParseDeclaration(code.Content, out var colorValue, out var colorName))
+                    {
+                        var chipNode = _nodeFactory.Create(
+                            NodeType.ColorChip,
+                            NodeCategory.Inline,
+                            text: colorName,
+                            range: range);
+                        chipNode.SetDerivedAttribute("color-value", colorValue);
+                        if (!string.IsNullOrEmpty(colorName))
+                        {
+                            chipNode.SetDerivedAttribute("color-name", colorName);
+                        }
+
+                        activeParent.AddChild(chipNode);
+                        break;
+                    }
+
                     activeParent.AddChild(
                         _nodeFactory.Create(
                             NodeType.InlineCode,
@@ -1006,6 +1097,16 @@ public sealed class MarkdigToNodeConverter
                 Message = "Unsupported inline element: HtmlInline",
                 Range = range
             });
+            return;
+        }
+
+        // 行内注释整段丢弃（Markdig 把整个 `<!-- ... -->` 作为一个 HtmlInline）。
+        // 不能走标签解析：注释体里的 `**`、`<` 等都不应参与渲染。
+        var trimmedTag = rawTag?.Trim();
+        if (trimmedTag is not null
+            && trimmedTag.StartsWith("<!--", StringComparison.Ordinal)
+            && trimmedTag.EndsWith("-->", StringComparison.Ordinal))
+        {
             return;
         }
 

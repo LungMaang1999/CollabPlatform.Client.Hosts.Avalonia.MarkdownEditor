@@ -245,6 +245,13 @@ public sealed class FenceKeywordRegistry
             return false;
         }
 
+        // 由专用块解析器实现、不登记到关键字表的内置语法，仍然占用关键字。
+        if (family == FenceFamily.PrimeFence
+            && string.Equals(keyword.Trim(), "collapse", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
         return _exact.ContainsKey((family, keyword.ToUpperInvariant()));
     }
 

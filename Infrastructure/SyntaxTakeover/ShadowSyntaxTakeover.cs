@@ -55,6 +55,10 @@ public static class ShadowSyntaxTakeover
             fenceKeywords,
             MarkdownParser.ResolveItemMarkers(declarations));
         builder.BlockParsers.Insert(0, primeFenceParser);
+        // 与生产管线同序：折叠、目录两个容器块都先于单引号分派器。
+        builder.BlockParsers.Insert(0, new CollapseParser());
+        builder.BlockParsers.Insert(0, new TocpicParser());
+        builder.BlockParsers.Insert(0, new ColorFenceParser());
 
         // 与生产 CreateRuntime 同一注册次序：单引号族在内置之后，其余字符（含代码围栏族）在之前。
         foreach (var fenceChar in registry.DeclaredFenceChars.Distinct())
@@ -112,6 +116,9 @@ public static class ShadowSyntaxTakeover
                 registry,
                 diagnostics);
             root = new SectionBuilder(nodeFactory).Build(blocks);
+
+            // 与生产管线同口径：标题锚点必须在整棵树拼好之后统一重算。
+            HeadingAnchorResolver.Apply(root);
         }
         catch (Exception ex)
         {

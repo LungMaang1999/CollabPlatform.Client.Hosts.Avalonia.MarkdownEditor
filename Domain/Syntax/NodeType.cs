@@ -68,5 +68,12 @@ public enum NodeType
 
     HtmlBlock,
     HtmlInline,
-    Custom
+    Custom,
+
+    // 新增类型一律追加在末尾：枚举数值参与块签名哈希，插队会让既有文档全部换签名。
+    Collapse,
+    Spoiler,
+    Tocpic,
+    ColorChip,
+    ColorBlock
 }

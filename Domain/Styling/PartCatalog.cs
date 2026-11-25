@@ -62,6 +62,13 @@ public static class PartCatalog
         new(NodeType.TimelineItem, PartTokens.Time, "md-tl-time", ElementPartRole.Meta, true, "条目时间"),
         new(NodeType.TimelineItem, PartTokens.Tags, "md-tl-tags", ElementPartRole.Meta, true, "条目标签"),
         new(NodeType.TimelineItem, PartTokens.Body, "md-tl-body", ElementPartRole.Content, true, "条目正文"),
+
+        // 折叠块
+        new(NodeType.Collapse, PartTokens.Root, "md-collapse", ElementPartRole.Root, true, "折叠块容器"),
+        new(NodeType.Collapse, PartTokens.Title, "md-collapse-summary", ElementPartRole.Title, true, "折叠块标题头"),
+        new(NodeType.Collapse, PartTokens.TitleText, "md-collapse-title", ElementPartRole.Title, false, "折叠块标题文字"),
+        new(NodeType.Collapse, PartTokens.Meta, "md-collapse-chevron", ElementPartRole.Meta, false, "折叠指示箭头"),
+        new(NodeType.Collapse, PartTokens.Content, "md-collapse-body", ElementPartRole.Content, true, "折叠块正文"),
     ];
 
     public static PartDescriptor? Find(NodeType nodeType, string part)

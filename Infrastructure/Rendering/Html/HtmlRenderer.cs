@@ -13,6 +13,7 @@ using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Graph;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Styling;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Domain.Syntax;
 using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Exporting.Html;
+using CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Parsing;
 using ExportingCssStyleBuilder = CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Exporting.Html.CssStyleBuilder;
 
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Rendering.Html;
@@ -107,6 +108,8 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         _generators["qrcode"] = WriteQrCodeGenerator;
         _generators["radar"] = WriteRadarGenerator;
         _generators["code-highlight"] = WriteCodeHighlightGenerator;
+        _generators["color-chip"] = WriteColorChipGenerator;
+        _generators["color-block"] = WriteColorBlockGenerator;
     }
 
     public RenderResult Render(MarkdownDocument document)
@@ -1625,6 +1628,11 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         NodeType.Custom,
         NodeType.PoemBlock,
         NodeType.TimelineItem,
+        NodeType.Collapse,
+        NodeType.Spoiler,
+        NodeType.Tocpic,
+        NodeType.ColorChip,
+        NodeType.ColorBlock,
         NodeType.YamlFrontMatter,
     ];
 
@@ -1633,8 +1641,10 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         try
         {
             // 已登记结构模板的类型走模板渲染；未登记或变体缺失时回落到既有 switch。
+            var nodeStart = html.Length;
             if (TryRenderTemplate(node, html, diagnostics))
             {
+                AppendAnchorGroupJumps(node, html, nodeStart);
                 return;
             }
 
@@ -2463,6 +2473,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         "poem-meta-break" => static context => context.Html.Append("<br class=\"poem-meta-break\"/>"),
         "admonition-icon" => WriteAdmonitionIcon,
         "admonition-title-text" => WriteAdmonitionTitleText,
+        "collapse-title" => WriteCollapseTitle,
         "custom-block-icon" => WriteCustomBlockIcon,
         _ => null,
     };
@@ -2515,6 +2526,8 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
             "node:id" => (PartAttributeValueSource.NodeAttribute, "id"),
             "node:href:backlink" => (PartAttributeValueSource.NodeAttribute, "href"),
             "node:timeline-side-effective" => (PartAttributeValueSource.NodeAttribute, "timeline-side-effective"),
+            "node:slug" => (PartAttributeValueSource.NodeAttribute, "slug"),
+            "node:anchor-index" => (PartAttributeValueSource.NodeAttribute, "anchor-index"),
             "node:url:link" => (PartAttributeValueSource.DeclaredFieldUrl, "url"),
             // 图片走内置的 image 策略（允许 data:image），与用户定义的元素绑定同一口径。
             "node:url:image" => (PartAttributeValueSource.NodeAttribute, "url"),
@@ -4352,6 +4365,47 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         }
     }
 
+    /// <summary>
+    /// 同名组锚点链接（[文字](#标题) 命中 n≥2 个同名标题）默认只渲染链接本身，
+    /// 把 1..n 个入口放进 .md-anchor-set，由外壳样式在悬停/聚焦时浮出。
+    /// 入口是主链接的兄弟节点而非子节点（HTML 不允许嵌套 &lt;a&gt;），
+    /// 因此用一个 position:relative 的 span 包住两者作为定位容器。
+    /// </summary>
+    private static void AppendAnchorGroupJumps(MarkdownNode node, StringBuilder html, int nodeStart)
+    {
+        if (node.Type != NodeType.Link
+            || !node.Attributes.TryGetValue("anchor-group-ids", out var raw)
+            || string.IsNullOrWhiteSpace(raw))
+        {
+            return;
+        }
+
+        var ids = raw.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (ids.Length < 2)
+        {
+            return;
+        }
+
+        var title = WebUtility.HtmlEncode(node.Text ?? string.Empty);
+        html.Insert(nodeStart, "<span class=\"md-anchor-ref\">");
+        html.Append("<span class=\"md-anchor-set\">");
+        for (int i = 0; i < ids.Length; i++)
+        {
+            // 文案已写明「第 N 处」，不再挂 title：否则浏览器会再叠一层系统 tooltip。
+            var label = "第 " + (i + 1).ToString(CultureInfo.InvariantCulture) + " 处";
+            var accessibleName = string.IsNullOrEmpty(title) ? label : label + "「" + title + "」";
+            html.Append("<a class=\"md-anchor-jump\" href=\"#")
+                .Append(WebUtility.HtmlEncode(ids[i]))
+                .Append("\" aria-label=\"")
+                .Append(accessibleName)
+                .Append("\">")
+                .Append(label)
+                .Append("</a>");
+        }
+
+        html.Append("</span></span>");
+    }
+
     /// <summary>代码块语言类：与渲染分支同一取值规则（首词、去空白）。</summary>
     private static string? ResolveLanguageClass(MarkdownNode node)
     {
@@ -4482,6 +4536,14 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         context.Html.Append(WebUtility.HtmlEncode(ResolveAdmonitionTitle(context.Node, safeKind)));
     }
 
+    /// <summary>折叠块标题：解析期已规范化（空标题给默认话术），这里只做编码。</summary>
+    private static void WriteCollapseTitle(TemplateRenderContext context)
+    {
+        var title = context.Node.Attributes.GetValueOrDefault("collapse-title");
+        context.Html.Append(WebUtility.HtmlEncode(
+            string.IsNullOrWhiteSpace(title) ? "详细信息" : title));
+    }
+
     private static string ResolveAdmonitionKind(string kind) =>
         AdmonitionCatalog.AdmonitionKinds.Contains(kind)
             ? kind
@@ -4579,6 +4641,118 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
             RenderChildren(node, html, diagnostics);
         }
         html.Append("</").Append(tag).Append('>');
+    }
+
+    /// <summary>
+    /// <c>color-chip</c> 生成器：输出色块 + 等宽大写色值 + 可选名称。
+    /// 色值已在解析阶段限定为十六进制并转大写，这里不做任何二次解释，避免把任意字符串写进样式。
+    /// </summary>
+    private static void WriteColorChipGenerator(PartGeneratorContext context)
+    {
+        if (context.Phase == PartGeneratorPhase.Attributes)
+        {
+            return;
+        }
+
+        var value = GetAttribute(context.Node, "color-value") ?? string.Empty;
+        var name = GetAttribute(context.Node, "color-name");
+
+        context.Html.Append("<span class=\"md-color-swatch\" style=\"background:")
+            .Append(value)
+            .Append("\"></span>");
+        context.Html.Append("<code class=\"md-color-value\">").Append(value).Append("</code>");
+
+        if (!string.IsNullOrEmpty(name))
+        {
+            context.Html.Append("<span class=\"md-color-name\">")
+                .Append(WebUtility.HtmlEncode(name))
+                .Append("</span>");
+        }
+    }
+
+    /// <summary>
+    /// <c>color-block</c> 生成器：一行一色、空行分行，按行渲染为色卡矩阵。
+    /// 非法行不丢弃内容，原样作为普通文本单元格输出并给出一条警告诊断。
+    /// </summary>
+    private static void WriteColorBlockGenerator(PartGeneratorContext context)
+    {
+        if (context.Phase == PartGeneratorPhase.Attributes)
+        {
+            return;
+        }
+
+        var rows = new List<List<(string? Value, string Name, string Raw)>>();
+        var current = new List<(string? Value, string Name, string Raw)>();
+
+        foreach (var rawLine in (context.Source ?? string.Empty).Split('\n'))
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0)
+            {
+                if (current.Count > 0)
+                {
+                    rows.Add(current);
+                    current = new List<(string? Value, string Name, string Raw)>();
+                }
+
+                continue;
+            }
+
+            if (ColorValueParser.TryParseEntry(line, out var value, out var name))
+            {
+                current.Add((value, name, line));
+            }
+            else
+            {
+                current.Add((null, string.Empty, line));
+                context.Diagnostics.Add(new DiagnosticMessage
+                {
+                    Severity = DiagnosticSeverity.Warning,
+                    Code = "COLOR_VALUE_INVALID",
+                    Message = "颜色声明里有一行不是合法色值，已按原文输出：" + line,
+                });
+            }
+        }
+
+        if (current.Count > 0)
+        {
+            rows.Add(current);
+        }
+
+        context.Html.Append("<div class=\"md-color-rows\">");
+        foreach (var row in rows)
+        {
+            context.Html.Append("<div class=\"md-color-row\">");
+            foreach (var (value, name, raw) in row)
+            {
+                if (value is null)
+                {
+                    context.Html.Append("<span class=\"md-color-cell md-color-cell-raw\"><code>")
+                        .Append(WebUtility.HtmlEncode(raw))
+                        .Append("</code></span>");
+                    continue;
+                }
+
+                context.Html.Append("<span class=\"md-color-cell\"><span class=\"md-color-swatch\" style=\"background:")
+                    .Append(value)
+                    .Append("\"></span><code class=\"md-color-value\">")
+                    .Append(value)
+                    .Append("</code>");
+
+                if (!string.IsNullOrEmpty(name))
+                {
+                    context.Html.Append("<span class=\"md-color-name\">")
+                        .Append(WebUtility.HtmlEncode(name))
+                        .Append("</span>");
+                }
+
+                context.Html.Append("</span>");
+            }
+
+            context.Html.Append("</div>");
+        }
+
+        context.Html.Append("</div>");
     }
 
     /// <summary>公式生成器：原文进 <c>data-tex</c>，正文是原文（转义由生成器负责）。</summary>

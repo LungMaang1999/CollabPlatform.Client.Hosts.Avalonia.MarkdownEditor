@@ -91,6 +91,10 @@ internal static class BlockRangeProjector
         {
             endLine = radarFence.ClosingFenceLineIndex.Value + 1;
         }
+        else if (obj is CollapseBlock { ClosingFenceLineIndex: >= 0 } collapseFence)
+        {
+            endLine = collapseFence.ClosingFenceLineIndex.Value + 1;
+        }
         else if (obj is LeafBlock leafBlock && leafBlock.Lines.Lines != null && leafBlock.Lines.Count > 0)
         {
             endLine = startLine + leafBlock.Lines.Count - 1;

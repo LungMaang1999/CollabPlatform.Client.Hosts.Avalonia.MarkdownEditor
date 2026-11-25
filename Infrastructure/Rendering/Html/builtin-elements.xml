@@ -36,7 +36,8 @@
       </attribute>
     </attributes>
     <structure>
-      <part slot="root" addressable="false" tag="h{level}" content="children"/>
+      <part slot="root" addressable="false" tag="h{level}" content="children"
+            attr="node:slug@id node:anchor-index@data-anchor-index"/>
     </structure>
   </element>
 
@@ -188,6 +189,35 @@
   <element id="builtin-inline-code" applies-to="InlineCode">
     <structure>
       <part slot="root" addressable="false" tag="code" content="text"/>
+    </structure>
+  </element>
+
+  <!-- 剧透：默认遮罩，点击/回车展开。tabindex/role 为固定常量，见 PartAttributeRules。 -->
+  <element id="builtin-spoiler" applies-to="Spoiler">
+    <structure>
+      <part slot="root" addressable="false" tag="span" class="md-spoiler" content="inline"
+            attr="literal:0@tabindex literal:button@role"/>
+    </structure>
+  </element>
+
+  <!-- 目录：正文是普通 Markdown 嵌套列表，宿主只提供导航容器，折叠交互由预览脚本增强。 -->
+  <element id="builtin-tocpic" applies-to="Tocpic">
+    <structure>
+      <part slot="root" addressable="false" tag="nav" class="md-tocpic" content="children"/>
+    </structure>
+  </element>
+
+  <!-- 颜色：行内声明（`color: #16A34A 名称`）由生成器输出色块 + 大写色值 + 可选名称。 -->
+  <element id="builtin-color-chip" applies-to="ColorChip">
+    <structure>
+      <part slot="root" addressable="false" tag="span" class="md-color-chip" generator="color-chip"/>
+    </structure>
+  </element>
+
+  <!-- 颜色：集中声明围栏（'''color / ```color），一行一色、空行分行，渲染为色卡矩阵。 -->
+  <element id="builtin-color-block" applies-to="ColorBlock">
+    <structure>
+      <part slot="root" addressable="false" tag="div" class="md-color-block" generator="color-block"/>
     </structure>
   </element>
 
@@ -670,6 +700,19 @@
   <element id="builtin-poem-note" applies-to="PoemNote" render="false">
     <structure>
       <part slot="root" addressable="false" tag="div" role="meta" class="poem-note"/>
+    </structure>
+  </element>
+
+  <!-- ── 折叠块：details/summary 原生折叠，正文照常按 Markdown 建树 ───── -->
+  <element id="builtin-collapse" applies-to="Collapse">
+    <structure>
+      <part slot="root" tag="details" class="md-collapse">
+        <part slot="title" tag="summary" role="title" class="md-collapse-summary">
+          <part slot="title-text" tag="span" class="md-collapse-title" content="collapse-title"/>
+          <part slot="meta" tag="span" class="md-collapse-chevron" content="nothing"/>
+        </part>
+        <part slot="content" role="content" tag="div" class="md-collapse-body" content="children"/>
+      </part>
     </structure>
   </element>
 

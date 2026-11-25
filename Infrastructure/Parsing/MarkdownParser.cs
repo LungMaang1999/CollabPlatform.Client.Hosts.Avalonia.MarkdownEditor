@@ -160,7 +160,13 @@ public sealed class MarkdownParser : IMarkdownParser
         // 三单引号族只有一个分派解析器：关键字→目标来自数据面，目标→块类型走块工厂表。
         var primeFenceParser = new FenceDispatchParser(fenceKeywords, ResolveItemMarkers(declarations));
 
+        // 折叠块是容器块，必须比单引号分派器先看到 `'''collapse`；其余三引号关键字仍交回分派器。
         pipelineBuilder.BlockParsers.Insert(0, primeFenceParser);
+        pipelineBuilder.BlockParsers.Insert(0, new CollapseParser());
+        // 目录块同样是容器块：正文按普通 Markdown 解析，条目链接天然带结构。
+        pipelineBuilder.BlockParsers.Insert(0, new TocpicParser());
+        // 颜色围栏是叶子块（正文按纯文本逐行读）：单引号与反引号两种围栏都认。
+        pipelineBuilder.BlockParsers.Insert(0, new ColorFenceParser());
 
         // 定义在构造期校验；无定义时不注册解析器，保持旧管线逐字节一致。
         var registry = new UserBlockRegistry(definitions);
@@ -423,6 +429,18 @@ public sealed class MarkdownParser : IMarkdownParser
     /// 带变化 custom-kind 的顶层块，其余块按引用复用。
     /// </summary>
     public MarkdownNode ReparseForUserBlockChange(
+        string source,
+        MarkdownNode previousRoot,
+        UserBlockSyntaxChange change)
+    {
+        var root = ReparseForUserBlockChangeInner(source, previousRoot, change);
+
+        // 定义变更只会重解析部分块，但锚点与锚点链接仍是文档级派生数据，统一重算。
+        HeadingAnchorResolver.Apply(root);
+        return root;
+    }
+
+    private MarkdownNode ReparseForUserBlockChangeInner(
         string source,
         MarkdownNode previousRoot,
         UserBlockSyntaxChange change)
@@ -756,6 +774,21 @@ public sealed class MarkdownParser : IMarkdownParser
     }
 
     private MarkdownNode ParseTreeCore(
+        string source,
+        MarkdownNode? previousRoot,
+        ICollection<DiagnosticMessage> diagnostics,
+        string? previousSource,
+        ParseRuntime runtime)
+    {
+        var root = ParseTreeCoreInner(source, previousRoot, diagnostics, previousSource, runtime);
+
+        // 标题锚点是文档级派生数据：增量解析会复用旧子树，必须在整棵树拼好之后统一重算，
+        // 否则切片里各自编号会让同名角标与锚点链接前后不一致。
+        HeadingAnchorResolver.Apply(root, diagnostics);
+        return root;
+    }
+
+    private MarkdownNode ParseTreeCoreInner(
         string source,
         MarkdownNode? previousRoot,
         ICollection<DiagnosticMessage> diagnostics,
@@ -1613,6 +1646,28 @@ public sealed class MarkdownParser : IMarkdownParser
         return true;
     }
 
+    // 探测切片与旧树的等价比较必须忽略文档级派生的锚点属性：
+    // 切片按局部算序号，旧树是整文档算的，两边本来就不该相等。
+    private static bool IsDocumentDerivedAnchorKey(string key) =>
+        string.Equals(key, "slug", StringComparison.Ordinal)
+        || string.Equals(key, "anchor-index", StringComparison.Ordinal)
+        || string.Equals(key, "anchor-group-size", StringComparison.Ordinal)
+        || string.Equals(key, "anchor-group-ids", StringComparison.Ordinal);
+
+    private static int CountComparableAttributes(MarkdownNode node)
+    {
+        var count = node.Attributes.Count;
+        foreach (var key in node.Attributes.Keys)
+        {
+            if (IsDocumentDerivedAnchorKey(key))
+            {
+                count--;
+            }
+        }
+
+        return count;
+    }
+
     // 块结构等价：类型/层级/文本/Raw/属性/全部后代一致，且切片局部坐标与
     // 期望的新文档坐标一致（不含 Id/样式）。
     private static bool BlockSubtreeEqual(
@@ -1636,7 +1691,7 @@ public sealed class MarkdownParser : IMarkdownParser
             || node.Level != actual.Level
             || !string.Equals(node.Text, actual.Text, StringComparison.Ordinal)
             || !string.Equals(node.RawMarkdown, actual.RawMarkdown, StringComparison.Ordinal)
-            || node.Attributes.Count != actual.Attributes.Count
+            || CountComparableAttributes(node) != CountComparableAttributes(actual)
             || node.Children.Count != actual.Children.Count)
         {
             return false;
@@ -1644,6 +1699,13 @@ public sealed class MarkdownParser : IMarkdownParser
 
         foreach (var pair in node.Attributes)
         {
+            // 标题锚点是文档级派生值：探测切片按局部算会得到不同序号，
+            // 这里跳过它们，最终树拼好后再统一重算。
+            if (IsDocumentDerivedAnchorKey(pair.Key))
+            {
+                continue;
+            }
+
             if (!actual.Attributes.TryGetValue(pair.Key, out var value)
                 || !string.Equals(value, pair.Value, StringComparison.Ordinal))
             {

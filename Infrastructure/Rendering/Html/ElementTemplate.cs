@@ -245,6 +245,11 @@ internal static class PartAttributeRules
         "data-side",
         // 时间线轨道：固定常量 true，纯无障碍标记。
         "aria-hidden",
+        // 同名标题角标：取值只能来自解析器派生的 anchor-index，值域纯数字。
+        "data-anchor-index",
+        // 剧透展开入口的无障碍标记：固定常量（tabindex=0 / role=button），不是属性通配。
+        "tabindex",
+        "role",
     };
 
     public static bool IsAllowedName(string? name) =>
@@ -276,6 +281,12 @@ internal static class PartAttributeRules
                            && string.Equals(attribute.Value, "timeline-side-effective", StringComparison.Ordinal),
             "aria-hidden" => attribute.Source == PartAttributeValueSource.Constant
                              && string.Equals(attribute.Value, "true", StringComparison.Ordinal),
+            "data-anchor-index" => attribute.Source == PartAttributeValueSource.NodeAttribute
+                                   && string.Equals(attribute.Value, "anchor-index", StringComparison.Ordinal),
+            "tabindex" => attribute.Source == PartAttributeValueSource.Constant
+                          && string.Equals(attribute.Value, "0", StringComparison.Ordinal),
+            "role" => attribute.Source == PartAttributeValueSource.Constant
+                      && string.Equals(attribute.Value, "button", StringComparison.Ordinal),
             _ => true,
         };
 
@@ -285,6 +296,11 @@ internal static class PartAttributeRules
         {
             "data-side" => string.Equals(value, "left", StringComparison.Ordinal)
                            || string.Equals(value, "right", StringComparison.Ordinal),
+            "data-anchor-index" => !string.IsNullOrEmpty(value)
+                                   && value.Length <= 3
+                                   && value.All(char.IsAsciiDigit),
+            "tabindex" => string.Equals(value, "0", StringComparison.Ordinal),
+            "role" => string.Equals(value, "button", StringComparison.Ordinal),
             _ => true,
         };
 }

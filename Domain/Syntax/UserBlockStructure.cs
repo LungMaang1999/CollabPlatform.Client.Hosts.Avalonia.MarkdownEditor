@@ -355,6 +355,8 @@ public static class UserBlockStructureRules
             ["math"] = new Dictionary<string, GeneratorParameterRule>(StringComparer.Ordinal),
             ["mermaid"] = new Dictionary<string, GeneratorParameterRule>(StringComparer.Ordinal),
             ["image-matrix"] = new Dictionary<string, GeneratorParameterRule>(StringComparer.Ordinal),
+            ["color-chip"] = new Dictionary<string, GeneratorParameterRule>(StringComparer.Ordinal),
+            ["color-block"] = new Dictionary<string, GeneratorParameterRule>(StringComparer.Ordinal),
             ["qrcode"] = new Dictionary<string, GeneratorParameterRule>(StringComparer.Ordinal)
             {
                 ["ecc"] = new(0, 0, new HashSet<string>(StringComparer.Ordinal) { "l", "m", "q", "h" }),
@@ -526,6 +528,7 @@ public static class UserBlockStructureRules
             "link", "footnote-label", "backref-icon", "space", "task-list", "nothing",
             "current-node-text", "timeline-time", "repeat-item", "poem-meta-break",
             "admonition-icon", "admonition-title-text", "custom-block-icon",
+            "collapse-title",
         };
 
     /// <summary>schema v3 命名内联样式配方：按块求值的封闭集合。</summary>
@@ -548,8 +551,8 @@ public static class UserBlockStructureRules
     /// <summary>schema v3 显式属性绑定允许的输出属性名（无事件、无内联样式、无类名通道）。</summary>
     private static readonly HashSet<string> AllowedBoundAttributeNames = new(StringComparer.Ordinal)
     {
-        "id", "href", "src", "alt", "title", "loading", "role", "aria-label", "aria-hidden",
-        "data-footnote-target", "data-side",
+        "id", "href", "src", "alt", "title", "loading", "role", "tabindex", "aria-label", "aria-hidden",
+        "data-footnote-target", "data-side", "data-anchor-index",
     };
 
     /// <summary>命名取值规范化委托：命中返回 true 并给出规范名。</summary>
@@ -734,6 +737,7 @@ public static class UserBlockStructureRules
     {
         "node-text" or "node:anchor" or "node:id" or "node:url:link" or "node:url:image"
             or "node:href:backlink" or "node:timeline-side-effective"
+            or "node:slug" or "node:anchor-index"
             or "ref:target" or "ref:backref-href" or "ref:backref-item"
             or "ref:backref-title" or "ref:backref-aria-label" => true,
         _ => IsLiteralAttributeSource(source),

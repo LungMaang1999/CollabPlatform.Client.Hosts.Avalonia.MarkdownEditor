@@ -1,4 +1,5 @@
 using Markdig;
+using Markdig.Extensions.Tables;
 using Markdig.Parsers;
 using Markdig.Parsers.Inlines;
 
@@ -25,6 +26,10 @@ internal static class InlineParserRegistration
         {
             builder.InlineParsers.Insert(0, new LatexInlineMathParser());
         }
+
+        // 剧透必须早于表格行内解析器（后者无条件认领每个 '|'，会把成对竖线拆成列分隔），
+        // 也必须早于转义解析器（否则 `\|\|` 先被转义吃掉）。行内公式占用首位时顺延到第二位。
+        builder.InlineParsers.Insert(options.EnableMathematics ? 1 : 0, new SpoilerInlineParser());
 
         if (options.EnableInlineCodeTakeover)
         {
@@ -83,6 +88,24 @@ internal static class InlineParserRegistration
                     "行内公式解析器必须先于转义解析器且位于首位："
                     + $"math={mathIndex}, escape={escapeIndex}。");
             }
+        }
+
+        // 剧透：成对竖线必须先于表格行内解析器与转义解析器看到输入。
+        var spoilerIndex = IndexOf(parsers, typeof(SpoilerInlineParser));
+        var spoilerEscapeIndex = IndexOf(parsers, typeof(EscapeInlineParser));
+        if (spoilerIndex < 0 || spoilerEscapeIndex < 0 || spoilerIndex >= spoilerEscapeIndex)
+        {
+            throw new InvalidOperationException(
+                "剧透解析器必须先于转义解析器："
+                + $"spoiler={spoilerIndex}, escape={spoilerEscapeIndex}。");
+        }
+
+        var pipeTableIndex = IndexOf(parsers, typeof(PipeTableParser));
+        if (pipeTableIndex >= 0 && spoilerIndex >= pipeTableIndex)
+        {
+            throw new InvalidOperationException(
+                "剧透解析器必须先于表格行内解析器（否则成对竖线先被拆成列分隔）："
+                + $"spoiler={spoilerIndex}, pipeTable={pipeTableIndex}。");
         }
     }
 
