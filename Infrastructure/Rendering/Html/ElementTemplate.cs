@@ -136,6 +136,12 @@ internal enum PartAttributeValueSource
     /// <summary>解析器写在节点上的已声明属性字段。</summary>
     NodeAttribute,
 
+    /// <summary>
+    /// 布尔存在型属性：字段值为 "true" 时输出裸属性名（如 <c>&lt;details open&gt;</c>），
+    /// 其余取值整条跳过。用于 HTML 里“只要出现即生效”的布尔属性。
+    /// </summary>
+    NodeAttributePresence,
+
     /// <summary>节点文本（如 <c>alt</c>）。</summary>
     NodeText,
 
@@ -250,6 +256,8 @@ internal static class PartAttributeRules
         // 剧透展开入口的无障碍标记：固定常量（tabindex=0 / role=button），不是属性通配。
         "tabindex",
         "role",
+        // 折叠块默认展开：布尔存在型属性，值只能来自解析器派生的 collapse-open。
+        "open",
     };
 
     public static bool IsAllowedName(string? name) =>
@@ -287,6 +295,8 @@ internal static class PartAttributeRules
                           && string.Equals(attribute.Value, "0", StringComparison.Ordinal),
             "role" => attribute.Source == PartAttributeValueSource.Constant
                       && string.Equals(attribute.Value, "button", StringComparison.Ordinal),
+            "open" => attribute.Source == PartAttributeValueSource.NodeAttributePresence
+                      && string.Equals(attribute.Value, "collapse-open", StringComparison.Ordinal),
             _ => true,
         };
 
@@ -301,6 +311,8 @@ internal static class PartAttributeRules
                                    && value.All(char.IsAsciiDigit),
             "tabindex" => string.Equals(value, "0", StringComparison.Ordinal),
             "role" => string.Equals(value, "button", StringComparison.Ordinal),
+            // 存在型属性没有值文本：只接受固定 true，命中时发射裸属性。
+            "open" => string.Equals(value, "true", StringComparison.Ordinal),
             _ => true,
         };
 }

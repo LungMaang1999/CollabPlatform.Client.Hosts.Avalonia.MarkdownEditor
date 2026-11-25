@@ -27,8 +27,8 @@ public sealed class ColorBlock : LeafBlock, IFencedBlock
 
 /// <summary>
 /// 颜色围栏解析器：只认 <c>color</c> 关键字，其余围栏交回原有解析器。
-/// 不复用围栏关键字注册表，是因为那张表是与服务端共享的保留字契约，
-/// 颜色属于纯渲染语法，不应改变共享契约。
+/// 不登记为关键字表里的可定义目标（颜色是纯渲染语法），但 color 会占用保留关键字，
+/// 防止定义层把它顶掉，也让围栏状态扫描能定位到它的起始行。
 /// </summary>
 public sealed class ColorFenceParser : BlockParser
 {

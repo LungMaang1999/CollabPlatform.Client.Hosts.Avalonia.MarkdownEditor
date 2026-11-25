@@ -29,7 +29,8 @@ internal static class UnclosedBlockMarker
         {
             if (unclosedFenceStartLine.HasValue
                 && block.Line + 1 == unclosedFenceStartLine.Value
-                && block is CodeBlock or MathBlock or ImageMatrixBlock or PoemBlock or TimelineBlock or RadarBlock)
+                && block is CodeBlock or MathBlock or ImageMatrixBlock or PoemBlock or TimelineBlock
+                    or RadarBlock or CollapseBlock or TocpicBlock or ColorBlock)
             {
                 // 文档末尾未闭合围栏对应的代码块、公式块、流程图块等。
                 block.SetData(UnclosedKey, true);

@@ -259,8 +259,11 @@ internal static class FenceStateScanner
 
     /// <summary>
     /// 内置单引号围栏关键字的识别直接查注册表，不再维护第二份字面量清单
-    /// （两份清单曾经缺 radar/spider，迟早对不上）。
+    /// （两份清单曾经缺 radar/spider，迟早对不上）；由专用块解析器实现、
+    /// 未登记到关键字表的 collapse/tocpic/color 同样占用关键字，必须一起识别，
+    /// 否则它们未闭合时定位不到起始行，pending 标记会漏。
     /// </summary>
     private static bool IsCustomFenceKeyword(string text) =>
-        FenceKeywordRegistry.BuiltIn.TryMatchPrefix(FenceFamily.PrimeFence, text, out _, out _);
+        FenceKeywordRegistry.BuiltIn.TryMatchPrefix(FenceFamily.PrimeFence, text, out _, out _)
+        || FenceKeywordRegistry.IsReservedPrimeKeyword(text);
 }

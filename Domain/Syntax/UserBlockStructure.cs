@@ -546,13 +546,14 @@ public static class UserBlockStructureRules
         {
             "language", "kind", "mermaid-state", "matrix-state", "qrcode-state", "radar-state",
             "poem-state", "timeline-time-state", "admonition-kind", "kind-minimal", "timeline-layout",
+            "collapse-state", "tocpic-state", "color-block-state",
         };
 
     /// <summary>schema v3 显式属性绑定允许的输出属性名（无事件、无内联样式、无类名通道）。</summary>
     private static readonly HashSet<string> AllowedBoundAttributeNames = new(StringComparer.Ordinal)
     {
         "id", "href", "src", "alt", "title", "loading", "role", "tabindex", "aria-label", "aria-hidden",
-        "data-footnote-target", "data-side", "data-anchor-index",
+        "data-footnote-target", "data-side", "data-anchor-index", "open",
     };
 
     /// <summary>命名取值规范化委托：命中返回 true 并给出规范名。</summary>
@@ -738,6 +739,7 @@ public static class UserBlockStructureRules
         "node-text" or "node:anchor" or "node:id" or "node:url:link" or "node:url:image"
             or "node:href:backlink" or "node:timeline-side-effective"
             or "node:slug" or "node:anchor-index"
+            or "presence:collapse-open"
             or "ref:target" or "ref:backref-href" or "ref:backref-item"
             or "ref:backref-title" or "ref:backref-aria-label" => true,
         _ => IsLiteralAttributeSource(source),

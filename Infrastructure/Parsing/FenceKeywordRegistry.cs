@@ -235,6 +235,42 @@ public sealed class FenceKeywordRegistry
     }
 
     /// <summary>
+    /// 由专用块解析器实现、不登记到关键字表的内置三单引号语法。
+    /// 它们不参与关键字→目标的查表，但仍占用关键字：定义层不能顶掉，
+    /// 围栏状态扫描也必须把它们当作围栏起始（否则未闭合时定位不到行）。
+    /// </summary>
+    private static readonly HashSet<string> ReservedPrimeKeywords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "collapse",
+        "tocpic",
+        "color",
+    };
+
+    /// <summary>文本首词是否为保留的三单引号关键字（后接空白或行尾）。</summary>
+    public static bool IsReservedPrimeKeyword(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return false;
+        }
+
+        foreach (var keyword in ReservedPrimeKeywords)
+        {
+            if (!text.StartsWith(keyword, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (text.Length == keyword.Length || char.IsWhiteSpace(text[keyword.Length]))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// 该关键字是否已被该围栏族的内置声明占用。定义层据此把内置关键字当保留字拒绝，
     /// 避免定义把内置关键字顶掉（同名跨族不冲突，因为是按族判定）。
     /// </summary>
@@ -247,7 +283,7 @@ public sealed class FenceKeywordRegistry
 
         // 由专用块解析器实现、不登记到关键字表的内置语法，仍然占用关键字。
         if (family == FenceFamily.PrimeFence
-            && string.Equals(keyword.Trim(), "collapse", StringComparison.OrdinalIgnoreCase))
+            && ReservedPrimeKeywords.Contains(keyword.Trim()))
         {
             return true;
         }

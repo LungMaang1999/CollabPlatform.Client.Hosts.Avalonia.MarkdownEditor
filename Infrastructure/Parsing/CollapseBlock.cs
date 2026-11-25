@@ -4,7 +4,9 @@ using Markdig.Syntax;
 namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Parsing;
 
 /// <summary>
-/// 三单引号折叠块：<c>'''collapse 标题</c> 开，纯引号行（长度不小于开围栏）闭。
+/// 三单引号折叠块：<c>'''collapse open 标题</c> 开，纯引号行（长度不小于开围栏）闭。
+/// 标题前可选的 <c>open</c> 独立词表示默认展开；<c>open</c> 只认首词，
+/// 因此标题正文里的 open 不会误判（需要以 open 开头的标题时改用行内强调或用词避开）。
 /// 正文走普通 Markdown 解析，是真实 ContainerBlock，子块照常建树；
 /// 嵌套折叠必须逐层减少引号数（外层四引号、内层三引号），同级或更多引号按正文保留。
 /// </summary>
@@ -21,6 +23,9 @@ public sealed class CollapseBlock : ContainerBlock, IFencedBlock
     /// <summary>折叠标题；为空时由转换器给默认标题。</summary>
     public string Title { get; set; } = string.Empty;
 
+    /// <summary>是否默认展开（开围栏关键字后紧跟独立 <c>open</c> 词）。</summary>
+    public bool Open { get; set; }
+
     public int? ClosingFenceLineIndex { get; set; }
 }
 
@@ -32,6 +37,7 @@ public sealed class CollapseParser : BlockParser
 {
     private const char FenceChar = '\'';
     private const string Keyword = "collapse";
+    private const string OpenToken = "open";
 
     public CollapseParser()
     {
@@ -76,8 +82,20 @@ public sealed class CollapseParser : BlockParser
         var block = new CollapseBlock(this)
         {
             FenceCount = count,
-            Title = rest.Length > Keyword.Length ? rest[Keyword.Length..].Trim() : string.Empty
         };
+
+        // 关键字之后的第一个独立词若是 open，则它就是默认展开开关，其余部分才是标题。
+        // 只认首词，保证标题里出现的 open 不会被误当成开关。
+        var afterKeyword = rest.Length > Keyword.Length
+            ? rest[Keyword.Length..].TrimStart()
+            : string.Empty;
+        if (StartsWithOpenFlag(afterKeyword))
+        {
+            block.Open = true;
+            afterKeyword = afterKeyword[OpenToken.Length..].TrimStart();
+        }
+
+        block.Title = afterKeyword.Trim();
         block.Column = processor.Column;
         block.Span = new SourceSpan(processor.Start, line.End);
 
@@ -113,6 +131,11 @@ public sealed class CollapseParser : BlockParser
     private static bool MatchesKeyword(string rest) =>
         rest.StartsWith(Keyword, StringComparison.OrdinalIgnoreCase)
         && (rest.Length == Keyword.Length || char.IsWhiteSpace(rest[Keyword.Length]));
+
+    /// <summary>首词是否为独立 open（后接空白或行尾）。</summary>
+    private static bool StartsWithOpenFlag(string text) =>
+        text.StartsWith(OpenToken, StringComparison.OrdinalIgnoreCase)
+        && (text.Length == OpenToken.Length || char.IsWhiteSpace(text[OpenToken.Length]));
 
     private static CollapseBlock? FindEnclosingCollapse(BlockProcessor processor)
     {

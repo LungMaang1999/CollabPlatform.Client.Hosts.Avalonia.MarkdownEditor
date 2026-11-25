@@ -2513,6 +2513,9 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
             node.Attributes.GetValueOrDefault("admonition") ?? string.Empty),
         "kind-minimal" => node => ResolveCustomBlockKindClass(node) + " custom-block-minimal",
         "timeline-layout" => node => BuildTimelineVariantClass(node, variant),
+        "collapse-state" => node => node.Attributes.ContainsKey(MarkdownAttributes.Unclosed) ? "md-block-pending" : null,
+        "tocpic-state" => node => node.Attributes.ContainsKey(MarkdownAttributes.Unclosed) ? "md-block-pending" : null,
+        "color-block-state" => node => node.Attributes.ContainsKey(MarkdownAttributes.Unclosed) ? "md-block-pending" : null,
         _ => null,
     };
 
@@ -2528,6 +2531,8 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
             "node:timeline-side-effective" => (PartAttributeValueSource.NodeAttribute, "timeline-side-effective"),
             "node:slug" => (PartAttributeValueSource.NodeAttribute, "slug"),
             "node:anchor-index" => (PartAttributeValueSource.NodeAttribute, "anchor-index"),
+            // 折叠块默认展开：布尔存在型属性，命中时输出裸 open。
+            "presence:collapse-open" => (PartAttributeValueSource.NodeAttributePresence, "collapse-open"),
             "node:url:link" => (PartAttributeValueSource.DeclaredFieldUrl, "url"),
             // 图片走内置的 image 策略（允许 data:image），与用户定义的元素绑定同一口径。
             "node:url:image" => (PartAttributeValueSource.NodeAttribute, "url"),
@@ -3857,13 +3862,13 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         }
     }
 
-    private static readonly List<(string Name, string Value)> EmptyAttributes = [];
+    private static readonly List<(string Name, string Value, bool Presence)> EmptyAttributes = [];
 
     /// <summary>
     /// 解析部件动态属性。返回 null 表示整个部件不得发射（图片 URL 不安全）；
     /// 非法属性名/非法 URL 逐条诊断后跳过，不改变其余输出。
     /// </summary>
-    private List<(string Name, string Value)>? BuildPartAttributes(
+    private List<(string Name, string Value, bool Presence)>? BuildPartAttributes(
         TemplateRenderContext context,
         PartTemplate part)
     {
@@ -3872,7 +3877,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
             return EmptyAttributes;
         }
 
-        List<(string Name, string Value)>? values = null;
+        List<(string Name, string Value, bool Presence)>? values = null;
 
         foreach (var attribute in part.Attributes)
         {
@@ -3977,7 +3982,10 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
                 }
             }
 
-            (values ??= []).Add((attribute.Name, value!));
+            (values ??= []).Add((
+                attribute.Name,
+                value!,
+                attribute.Source == PartAttributeValueSource.NodeAttributePresence));
         }
 
         return values ?? EmptyAttributes;
@@ -3995,6 +4003,13 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
             PartAttributeValueSource.NodeAttribute => attribute.Value is null
                 ? null
                 : GetAttribute(context.CurrentNode, attribute.Value),
+            PartAttributeValueSource.NodeAttributePresence => attribute.Value is not null
+                && string.Equals(
+                    GetAttribute(context.CurrentNode, attribute.Value),
+                    "true",
+                    StringComparison.OrdinalIgnoreCase)
+                    ? "true"
+                    : null,
             PartAttributeValueSource.DeclaredFieldUrl => attribute.Value is null
                 ? null
                 : ResolveDeclaredField(context.CurrentNode, attribute.Value),
@@ -4018,11 +4033,18 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
     }
 
     private static void AppendPartAttributes(
-        List<(string Name, string Value)> attributes,
+        List<(string Name, string Value, bool Presence)> attributes,
         StringBuilder html)
     {
-        foreach (var (name, value) in attributes)
+        foreach (var (name, value, presence) in attributes)
         {
+            // 存在型属性（如 open）只写名字，其余即使值为空也要保留等号。
+            if (presence)
+            {
+                html.Append(' ').Append(name);
+                continue;
+            }
+
             html.Append(' ').Append(name).Append("=\"").Append(WebUtility.HtmlEncode(value)).Append('"');
         }
     }

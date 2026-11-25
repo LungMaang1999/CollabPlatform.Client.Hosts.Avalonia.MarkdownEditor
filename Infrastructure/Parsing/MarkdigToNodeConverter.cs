@@ -86,6 +86,16 @@ public sealed class MarkdigToNodeConverter
                     if (UnclosedBlockMarker.IsUnclosed(block))
                     {
                         node.SetDerivedAttribute(MarkdownAttributes.Unclosed, "true");
+                        if (TryGetUnclosedFenceLabel(block, out var fenceLabel))
+                        {
+                            diagnostics.Add(new DiagnosticMessage
+                            {
+                                Severity = DiagnosticSeverity.Warning,
+                                Code = "FENCED_BLOCK_UNCLOSED",
+                                Message = $"{fenceLabel}围栏未闭合，已按到文档末尾处理；补上闭合引号行后恢复。",
+                                Range = node.Range
+                            });
+                        }
                     }
 
                     resultNodes.Add(node);
@@ -104,6 +114,49 @@ public sealed class MarkdigToNodeConverter
         }
 
         return resultNodes;
+    }
+
+    /// <summary>未闭合围栏块的中文名，用于诊断文案；其余块不额外报诊断。</summary>
+    private static bool TryGetUnclosedFenceLabel(Block block, out string label)
+    {
+        switch (block)
+        {
+            case CollapseBlock:
+                label = "折叠块";
+                return true;
+            case TocpicBlock:
+                label = "目录块";
+                return true;
+            case ColorBlock:
+                label = "颜色块";
+                return true;
+            default:
+                label = string.Empty;
+                return false;
+        }
+    }
+
+    /// <summary>块内列表的最大嵌套层数；无序、有序列表同等计入。</summary>
+    private static int ComputeListDepth(IReadOnlyList<MarkdownNode> nodes)
+    {
+        var depth = 0;
+        foreach (var node in nodes)
+        {
+            // 只沿“列表 → 列表项 → 子列表”这条链数层级；
+            // 列表项里嵌的折叠/引用等容器不参与目录深度。
+            var current = node.Type switch
+            {
+                NodeType.UnorderedList or NodeType.OrderedList => 1 + ComputeListDepth(node.Children),
+                NodeType.ListItem or NodeType.TaskListItem => ComputeListDepth(node.Children),
+                _ => 0,
+            };
+            if (current > depth)
+            {
+                depth = current;
+            }
+        }
+
+        return depth;
     }
 
     private MarkdownNode? ConvertBlock(
@@ -202,6 +255,12 @@ public sealed class MarkdigToNodeConverter
                         ? "详细信息"
                         : collapseBlock.Title.Trim();
                     collapseNode.SetDerivedAttribute("collapse-title", collapseTitle);
+                    if (collapseBlock.Open)
+                    {
+                        // 只有显式 open 才落属性：缺省即收起，渲染层据此输出裸 open 属性。
+                        collapseNode.SetDerivedAttribute("collapse-open", "true");
+                    }
+
                     collapseNode.Text = collapseTitle;
 
                     var collapseChildren = ConvertChildren(collapseBlock, diagnostics, source);
@@ -227,6 +286,14 @@ public sealed class MarkdigToNodeConverter
                     }
 
                     tocpicNode.Text = GetInlineText(tocpicNode);
+
+                    // 目录深度＝块内列表的最大嵌套层数（无序/有序都算），供属性面板只读项展示。
+                    var tocDepth = ComputeListDepth(tocpicChildren);
+                    if (tocDepth > 0)
+                    {
+                        tocpicNode.SetDerivedAttribute("toc-depth", tocDepth.ToString(CultureInfo.InvariantCulture));
+                    }
+
                     return tocpicNode;
                 }
 
@@ -296,15 +363,18 @@ public sealed class MarkdigToNodeConverter
                     }
 
                     // 表格行内的裸 `||` 会先被表格切成空单元格，剧透无法成立。
+                    // 只看源文本是否真含裸 `||`：合法空单元格（`| a |  | b |`）本来就没有 `||`，
+                    // 不能因为单元格文本为空就误报；`\|\|` 是作者显式转义，也不算裸管道。
                     // 这里只提示、不改写原文：改写会改变作者声明的列数。
-                    if (!rowBlock.IsHeader
-                        && rowNode.Children.Any(cell => string.IsNullOrEmpty(cell.Text)))
+                    var rowRange = BlockRangeProjector.Get(rowBlock);
+                    if (!rowBlock.IsHeader && ContainsBareDoublePipe(ExtractRaw(source, rowRange)))
                     {
                         diagnostics.Add(new DiagnosticMessage
                         {
                             Severity = DiagnosticSeverity.Warning,
                             Code = "SPOILER_PIPE_IN_TABLE",
                             Message = "表格行内的裸 `||` 已按列分隔处理；如需剧透请写成 `\\|\\|内容\\|\\|`。",
+                            Range = rowRange
                         });
                     }
 
@@ -1665,6 +1735,25 @@ public sealed class MarkdigToNodeConverter
 
         var length = Math.Min(range.Length, source.Length - range.StartOffset);
         return source.AsSpan(range.StartOffset, length).TrimEnd('\n').TrimEnd('\r').ToString();
+    }
+
+    /// <summary>源文本里是否存在未被反斜杠转义的裸 <c>||</c>。</summary>
+    private static bool ContainsBareDoublePipe(string text)
+    {
+        for (var i = 0; i + 1 < text.Length; i++)
+        {
+            if (text[i] != '|' || text[i + 1] != '|')
+            {
+                continue;
+            }
+
+            if (i == 0 || text[i - 1] != '\\')
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool TryGetTaskState(

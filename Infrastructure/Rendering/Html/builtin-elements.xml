@@ -203,7 +203,7 @@
   <!-- 目录：正文是普通 Markdown 嵌套列表，宿主只提供导航容器，折叠交互由预览脚本增强。 -->
   <element id="builtin-tocpic" applies-to="Tocpic">
     <structure>
-      <part slot="root" addressable="false" tag="nav" class="md-tocpic" content="children"/>
+      <part slot="root" addressable="false" tag="nav" class="md-tocpic" class-recipe="tocpic-state" content="children"/>
     </structure>
   </element>
 
@@ -217,7 +217,7 @@
   <!-- 颜色：集中声明围栏（'''color / ```color），一行一色、空行分行，渲染为色卡矩阵。 -->
   <element id="builtin-color-block" applies-to="ColorBlock">
     <structure>
-      <part slot="root" addressable="false" tag="div" class="md-color-block" generator="color-block"/>
+      <part slot="root" addressable="false" tag="div" class="md-color-block" class-recipe="color-block-state" generator="color-block"/>
     </structure>
   </element>
 
@@ -704,9 +704,11 @@
   </element>
 
   <!-- ── 折叠块：details/summary 原生折叠，正文照常按 Markdown 建树 ───── -->
+  <!-- 默认展开由开围栏的 open 开关派生；open 是布尔存在型属性，命中时输出裸 open。 -->
   <element id="builtin-collapse" applies-to="Collapse">
     <structure>
-      <part slot="root" tag="details" class="md-collapse">
+      <part slot="root" tag="details" class="md-collapse" class-recipe="collapse-state"
+            attr="presence:collapse-open@open">
         <part slot="title" tag="summary" role="title" class="md-collapse-summary">
           <part slot="title-text" tag="span" class="md-collapse-title" content="collapse-title"/>
           <part slot="meta" tag="span" class="md-collapse-chevron" content="nothing"/>
