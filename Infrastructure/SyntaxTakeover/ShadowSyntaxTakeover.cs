@@ -47,6 +47,7 @@ public static class ShadowSyntaxTakeover
 
         // 与生产同序：带中间文字的分割线在 ThematicBreakParser 之前；标签为空时交还原生分割线。
         builder.BlockParsers.Insert(0, new DividerParser());
+        builder.BlockParsers.Insert(0, new AnchorMatrixParser());
 
         // 与生产 CreateRuntime 同一份数据：内置数据面与文档定义合并后重建关键字表，
         // 块类型走块工厂表。

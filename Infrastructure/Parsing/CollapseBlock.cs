@@ -7,8 +7,9 @@ namespace CollabPlatform.Client.Hosts.Avalonia.MarkdownEditor.Infrastructure.Par
 /// 三单引号折叠块：<c>'''collapse open 标题</c> 开，纯引号行（长度不小于开围栏）闭。
 /// 标题前可选的 <c>open</c> 独立词表示默认展开；<c>open</c> 只认首词，
 /// 因此标题正文里的 open 不会误判（需要以 open 开头的标题时改用行内强调或用词避开）。
-/// 正文走普通 Markdown 解析，是真实 ContainerBlock，子块照常建树；
-/// 嵌套折叠必须逐层减少引号数（外层四引号、内层三引号），同级或更多引号按正文保留。
+/// 正文走普通 Markdown 解析，是真实 ContainerBlock，子块照常建树。
+/// 嵌套闭合按最内层优先（见 <see cref="FenceNestingPlan"/>），因此外层与内层可以同用 3 个引号；
+/// 外层多引号、内层少引号的旧写法同样成立。
 /// </summary>
 public sealed class CollapseBlock : ContainerBlock, IFencedBlock
 {
@@ -25,6 +26,9 @@ public sealed class CollapseBlock : ContainerBlock, IFencedBlock
 
     /// <summary>是否默认展开（开围栏关键字后紧跟独立 <c>open</c> 词）。</summary>
     public bool Open { get; set; }
+
+    /// <summary>预扫描计划中的围栏层级（从 1 开始）；0 表示退回旧的闭合规则。</summary>
+    public int NestingDepth { get; set; }
 
     public int? ClosingFenceLineIndex { get; set; }
 }
@@ -72,16 +76,23 @@ public sealed class CollapseParser : BlockParser
             return BlockState.None;
         }
 
-        // 嵌套必须严格减少引号数：外层四引号、内层三引号；同级或更多按普通正文保留。
-        var enclosing = FindEnclosingCollapse(processor);
-        if (enclosing is not null && count >= enclosing.FenceCount)
+        // 预扫描计划覆盖不到的行（缩进列表、引用等）保持旧规则：嵌套必须减少引号数，
+        // 同级或更多按普通正文保留，避免计划与解析器对层级判断分叉。
+        var plan = FenceNestingPlan.FromContext(processor.Context);
+        var depth = plan?.GetOpenDepth(processor.LineIndex) ?? 0;
+        if (depth == 0)
         {
-            return BlockState.None;
+            var enclosing = FindEnclosingCollapse(processor);
+            if (enclosing is not null && count >= enclosing.FenceCount)
+            {
+                return BlockState.None;
+            }
         }
 
         var block = new CollapseBlock(this)
         {
             FenceCount = count,
+            NestingDepth = depth,
         };
 
         // 关键字之后的第一个独立词若是 open，则它就是默认展开开关，其余部分才是标题。
@@ -105,6 +116,7 @@ public sealed class CollapseParser : BlockParser
 
     public override BlockState TryContinue(BlockProcessor processor, Block block)
     {
+        var collapse = (CollapseBlock)block;
         var line = processor.Line;
 
         var closeCount = 0;
@@ -114,11 +126,26 @@ public sealed class CollapseParser : BlockParser
             line.NextChar();
         }
 
-        if (closeCount >= ((CollapseBlock)block).FenceCount
+        var plan = FenceNestingPlan.FromContext(processor.Context);
+        if (collapse.NestingDepth > 0 && plan is not null)
+        {
+            // 计划内：只有「关这一层」的行才闭合，内层的闭合行留给内层。
+            if (plan.GetCloseDepth(processor.LineIndex) == collapse.NestingDepth)
+            {
+                collapse.ClosingFenceLineIndex = processor.LineIndex;
+                block.UpdateSpanEnd(line.Start);
+                return BlockState.BreakDiscard;
+            }
+
+            processor.GoToColumn(processor.ColumnBeforeIndent);
+            return BlockState.Continue;
+        }
+
+        if (closeCount >= collapse.FenceCount
             && !processor.IsCodeIndent
             && line.ToString().Trim().Length == 0)
         {
-            ((CollapseBlock)block).ClosingFenceLineIndex = processor.LineIndex;
+            collapse.ClosingFenceLineIndex = processor.LineIndex;
             block.UpdateSpanEnd(line.Start);
             return BlockState.BreakDiscard;
         }

@@ -357,6 +357,7 @@ public static class UserBlockStructureRules
             ["image-matrix"] = new Dictionary<string, GeneratorParameterRule>(StringComparer.Ordinal),
             ["color-chip"] = new Dictionary<string, GeneratorParameterRule>(StringComparer.Ordinal),
             ["color-block"] = new Dictionary<string, GeneratorParameterRule>(StringComparer.Ordinal),
+            ["anchor-matrix"] = new Dictionary<string, GeneratorParameterRule>(StringComparer.Ordinal),
             ["qrcode"] = new Dictionary<string, GeneratorParameterRule>(StringComparer.Ordinal)
             {
                 ["ecc"] = new(0, 0, new HashSet<string>(StringComparer.Ordinal) { "l", "m", "q", "h" }),
@@ -536,7 +537,7 @@ public static class UserBlockStructureRules
         new HashSet<string>(StringComparer.Ordinal)
         {
             "align-block", "align-inline", "table-row-vars", "cell-align",
-            "math-vars", "matrix-vars",
+            "math-vars", "matrix-vars", "anchor-matrix-vars",
             "accent-adm", "accent-cb", "timeline-vars",
         };
 

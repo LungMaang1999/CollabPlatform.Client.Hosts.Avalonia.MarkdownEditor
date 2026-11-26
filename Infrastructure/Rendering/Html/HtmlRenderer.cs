@@ -110,6 +110,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
         _generators["code-highlight"] = WriteCodeHighlightGenerator;
         _generators["color-chip"] = WriteColorChipGenerator;
         _generators["color-block"] = WriteColorBlockGenerator;
+        _generators["anchor-matrix"] = WriteAnchorMatrixGenerator;
     }
 
     public RenderResult Render(MarkdownDocument document)
@@ -2491,6 +2492,7 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
                 : null,
         "math-vars" => BuildMathStyleVars,
         "matrix-vars" => node => BuildMatrixExtraCss(node, CountMatrixColumns(CollectMatrixRows(node))),
+        "anchor-matrix-vars" => BuildAnchorMatrixVars,
         "accent-adm" => node => ResolveSemanticAccentCss(node, "--adm-accent"),
         "accent-cb" => node => ResolveSemanticAccentCss(node, "--cb-accent"),
         "timeline-vars" => BuildTimelineStyleVars,
@@ -4950,6 +4952,84 @@ internal sealed class HtmlRenderer : IDocumentRenderer, IIncrementalPreviewRende
             context.Html.Append("</div>");
         }
     }
+
+    /// <summary>
+    /// 锚点矩阵生成器：从整篇文档收集标题，按 depth 截断，输出「序号 + 标题」的整格链接。
+    /// 与目录同源：slug 与同名标题规则由 <see cref="Domain.Syntax.HeadingAnchorResolver"/> 统一写入。
+    /// </summary>
+    private static void WriteAnchorMatrixGenerator(PartGeneratorContext context)
+    {
+        if (context.Phase == PartGeneratorPhase.Attributes)
+        {
+            return;
+        }
+
+        var depth = ParseIntAttribute(
+            context.Node,
+            AnchorMatrixSyntax.DepthAttribute,
+            AnchorMatrixSyntax.DefaultDepth);
+        depth = Math.Clamp(depth, AnchorMatrixSyntax.MinDepth, AnchorMatrixSyntax.MaxDepth);
+
+        var root = context.Node;
+        while (root.Parent is not null)
+        {
+            root = root.Parent;
+        }
+
+        var headings = new List<MarkdownNode>();
+        CollectAnchorMatrixHeadings(root, depth, headings);
+        if (headings.Count == 0)
+        {
+            context.Html.Append("<div class=\"md-anchor-matrix-empty\">当前文档还没有标题</div>");
+            return;
+        }
+
+        var index = 0;
+        var html = context.Html;
+        foreach (var heading in headings)
+        {
+            var slug = GetAttribute(heading, "slug");
+            if (string.IsNullOrEmpty(slug))
+            {
+                continue;
+            }
+
+            index++;
+            html.Append("<a class=\"md-anchor-matrix-cell\" href=\"#");
+            AppendEncoded(html, slug);
+            html.Append("\"><span class=\"md-anchor-matrix-index\">")
+                .Append(index)
+                .Append("</span><span class=\"md-anchor-matrix-title\">");
+            AppendEncoded(html, (heading.Text ?? string.Empty).Trim());
+            html.Append("</span></a>");
+        }
+    }
+
+    private static void CollectAnchorMatrixHeadings(
+        MarkdownNode node,
+        int depth,
+        List<MarkdownNode> result)
+    {
+        foreach (var child in node.Children)
+        {
+            if (child.Type == NodeType.Heading && (child.Level ?? 1) <= depth)
+            {
+                result.Add(child);
+            }
+
+            CollectAnchorMatrixHeadings(child, depth, result);
+        }
+    }
+
+    private static string BuildAnchorMatrixVars(MarkdownNode node)
+    {
+        var cols = ParseIntAttribute(node, AnchorMatrixSyntax.ColsAttribute, AnchorMatrixSyntax.DefaultCols);
+        cols = Math.Clamp(cols, AnchorMatrixSyntax.MinCols, AnchorMatrixSyntax.MaxCols);
+        return "--md-anchor-matrix-cols: " + cols + ";";
+    }
+
+    private static int ParseIntAttribute(MarkdownNode node, string key, int fallback) =>
+        int.TryParse(GetAttribute(node, key), out var value) ? value : fallback;
 
     /// <summary>二维码生成器：完整内容进 <c>data-tip</c>，正文是 SVG/占位/错误块。</summary>
     private static void WriteQrCodeGenerator(PartGeneratorContext context)

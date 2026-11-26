@@ -49,7 +49,13 @@ internal static class ParsedDocumentPipeline
             // 多引用/转义脚的写法 Markdig 原生解析会切碎或漏字，先按等长占位符遮蔽再解析；
             // 转换仍用原始源码取 RawMarkdown，保证增量拼接与源码回读拿到的是用户原文。
             var parseSource = FootnoteReferencePreprocessor.Prepare(source);
-            document = ParseEnriched(parseSource, pipeline, userBlocks);
+
+            // Markdig 之前先定好每行是开围栏还是闭合围栏，闭合按最内层执行；
+            // 计划只对能识别的围栏行生效，未覆盖的行由解析器回落到旧规则。
+            var plan = FenceNestingScanner.Scan(parseSource, converter.KeywordRegistry, userBlocks);
+            ReportNestingIssues(plan, diagnostics);
+
+            document = ParseEnriched(parseSource, pipeline, userBlocks, plan);
             return converter.ConvertBlocks(document, diagnostics, source);
         }
         catch (ParsedDocumentException)
@@ -69,14 +75,20 @@ internal static class ParsedDocumentPipeline
     internal static MarkdownDocument ParseEnriched(
         string source,
         Markdig.MarkdownPipeline? pipeline,
-        UserBlockRegistry? userBlocks)
+        UserBlockRegistry? userBlocks,
+        FenceNestingPlan? plan = null)
     {
+        // 未显式传入计划时按本源重建，保证解析器拿到的判定与这份源码一致。
+        plan ??= FenceNestingScanner.Scan(source, keywords: null, userBlocks);
+
         MarkdownDocument document;
         try
         {
+            var context = new Markdig.MarkdownParserContext();
+            context.Properties[FenceNestingPlan.ContextKey] = plan;
             document = pipeline is null
                 ? Markdig.Markdown.Parse(source)
-                : Markdig.Markdown.Parse(source, pipeline);
+                : Markdig.Markdown.Parse(source, pipeline, context);
         }
         catch (Exception ex)
         {
@@ -85,6 +97,35 @@ internal static class ParsedDocumentPipeline
 
         EnrichDocument(document, source, pipeline, userBlocks);
         return document;
+    }
+
+    /// <summary>
+    /// 错配诊断：闭合行引号数少于栈顶围栏开围栏数时，这一行既闭合不了也不该被静默吞掉。
+    /// 同长度不再报错（那是合法的同层嵌套），只保留这种真正的引号数错配。
+    /// </summary>
+    private static void ReportNestingIssues(
+        FenceNestingPlan plan,
+        ICollection<DiagnosticMessage> diagnostics)
+    {
+        foreach (var issue in plan.Issues)
+        {
+            diagnostics.Add(new DiagnosticMessage
+            {
+                Severity = DiagnosticSeverity.Warning,
+                Code = "FENCED_BLOCK_NESTING_INVALID",
+                Message = $"闭合行用了 {issue.QuoteCount} 个引号，少于当前围栏的 {issue.OpenQuoteCount} 个，"
+                    + "无法闭合，已按正文保留；补足到相同引号数即可闭合。",
+                Range = new SourceRange
+                {
+                    StartOffset = issue.StartOffset,
+                    Length = issue.QuoteCount,
+                    StartLine = issue.LineIndex + 1,
+                    StartColumn = issue.StartColumn,
+                    EndLine = issue.LineIndex + 1,
+                    EndColumn = issue.StartColumn + issue.QuoteCount,
+                },
+            });
+        }
     }
 
     public static bool IsEnriched(ContainerBlock rootContainer) => rootContainer.ContainsData(EnrichedKey);

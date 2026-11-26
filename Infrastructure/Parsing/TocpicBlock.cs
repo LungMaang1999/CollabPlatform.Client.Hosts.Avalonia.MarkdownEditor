@@ -18,6 +18,9 @@ public sealed class TocpicBlock : ContainerBlock, IFencedBlock
     /// <summary>开围栏的引号数量（≥3），闭合行必须不少于该长度。</summary>
     public int FenceCount { get; set; }
 
+    /// <summary>预扫描计划中的围栏层级（从 1 开始）；0 表示退回旧的闭合规则。</summary>
+    public int NestingDepth { get; set; }
+
     public int? ClosingFenceLineIndex { get; set; }
 }
 
@@ -72,6 +75,7 @@ public sealed class TocpicParser : BlockParser
         var block = new TocpicBlock(this)
         {
             FenceCount = count,
+            NestingDepth = FenceNestingPlan.FromContext(processor.Context)?.GetOpenDepth(processor.LineIndex) ?? 0,
         };
         block.Column = processor.Column;
         block.Span = new SourceSpan(processor.Start, line.End);
@@ -82,6 +86,7 @@ public sealed class TocpicParser : BlockParser
 
     public override BlockState TryContinue(BlockProcessor processor, Block block)
     {
+        var tocpic = (TocpicBlock)block;
         var line = processor.Line;
 
         var closeCount = 0;
@@ -91,11 +96,25 @@ public sealed class TocpicParser : BlockParser
             line.NextChar();
         }
 
-        if (closeCount >= ((TocpicBlock)block).FenceCount
+        var plan = FenceNestingPlan.FromContext(processor.Context);
+        if (tocpic.NestingDepth > 0 && plan is not null)
+        {
+            if (plan.GetCloseDepth(processor.LineIndex) == tocpic.NestingDepth)
+            {
+                tocpic.ClosingFenceLineIndex = processor.LineIndex;
+                block.UpdateSpanEnd(line.Start);
+                return BlockState.BreakDiscard;
+            }
+
+            processor.GoToColumn(processor.ColumnBeforeIndent);
+            return BlockState.Continue;
+        }
+
+        if (closeCount >= tocpic.FenceCount
             && !processor.IsCodeIndent
             && line.ToString().Trim().Length == 0)
         {
-            ((TocpicBlock)block).ClosingFenceLineIndex = processor.LineIndex;
+            tocpic.ClosingFenceLineIndex = processor.LineIndex;
             block.UpdateSpanEnd(line.Start);
             return BlockState.BreakDiscard;
         }

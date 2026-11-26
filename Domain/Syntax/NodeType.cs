@@ -76,5 +76,8 @@ public enum NodeType
     Tocpic,
     ColorChip,
     ColorBlock,
-    Divider
+    Divider,
+
+    /// <summary>锚点矩阵：由文档标题自动生成的卡片网格，语法 <c>[ANCHORMATRIX depth=2 cols=3]</c>。</summary>
+    AnchorMatrix
 }

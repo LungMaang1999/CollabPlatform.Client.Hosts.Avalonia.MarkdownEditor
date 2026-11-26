@@ -48,6 +48,9 @@ public sealed class MarkdigToNodeConverter
         _blockHtml = blockHtml is null ? null : new InlineHtmlPolicy(blockHtml);
     }
 
+    /// <summary>本次运行时使用的围栏关键字表，供解析前的围栏预扫描复用同一份判定。</summary>
+    internal FenceKeywordRegistry KeywordRegistry => _fenceKeywords;
+
     internal List<MarkdownNode> ConvertBlocks(
         ContainerBlock rootContainer,
         ICollection<DiagnosticMessage> diagnostics,
@@ -162,102 +165,6 @@ public sealed class MarkdigToNodeConverter
         }
     }
 
-    /// <summary>
-    /// 嵌套围栏的显式降级提示：内层引号数必须少于外层，否则内层的闭合行会先被外层看到，
-    /// 提前结束外层并把后续内容甩到容器之外。只提示，不改变解析结果（内容仍按正文保留）。
-    /// </summary>
-    private static void ReportNestedFenceMismatch(
-        Block block,
-        SourceRange range,
-        ICollection<DiagnosticMessage> diagnostics)
-    {
-        var outerCount = EnclosingFenceCount(block);
-        if (outerCount < 3)
-        {
-            return;
-        }
-
-        var innerCount = block switch
-        {
-            CollapseBlock collapse => collapse.FenceCount,
-            TocpicBlock tocpic => tocpic.FenceCount,
-            ColorBlock color => color.FenceCount,
-            _ => 0,
-        };
-        if (innerCount < 3 || innerCount < outerCount)
-        {
-            return;
-        }
-
-        diagnostics.Add(new DiagnosticMessage
-        {
-            Severity = DiagnosticSeverity.Warning,
-            Code = "FENCED_BLOCK_NESTING_INVALID",
-            Message = $"内层围栏用了 {innerCount} 个引号、外层只有 {outerCount} 个：内层闭合行会提前结束外层。" +
-                      "嵌套时外层引号数必须多于内层（例如外层 4 个、内层 3 个）。",
-            Range = range,
-        });
-    }
-
-    /// <summary>
-    /// 被拒绝的同级/更长开围栏会退化成正文段落（例如折叠块里的 <c>'''collapse</c>）。
-    /// 段落首行以 3 个以上引号开头且不少于外层时补一条同样的警告，避免用户以为嵌套生效了。
-    /// </summary>
-    private static void ReportRejectedNestedFence(
-        Block block,
-        string text,
-        SourceRange range,
-        ICollection<DiagnosticMessage> diagnostics)
-    {
-        var outerCount = EnclosingFenceCount(block);
-        if (outerCount < 3)
-        {
-            return;
-        }
-
-        var line = text;
-        var newline = line.IndexOfAny(['\r', '\n']);
-        if (newline >= 0)
-        {
-            line = line[..newline];
-        }
-
-        line = line.TrimStart();
-        var quoteCount = 0;
-        while (quoteCount < line.Length && line[quoteCount] == '\'')
-        {
-            quoteCount++;
-        }
-
-        if (quoteCount < 3 || quoteCount < outerCount)
-        {
-            return;
-        }
-
-        var rest = line[quoteCount..].TrimStart();
-        if (rest.Length == 0 || (!char.IsLetter(rest[0]) && rest[0] != '-'))
-        {
-            return;
-        }
-
-        diagnostics.Add(new DiagnosticMessage
-        {
-            Severity = DiagnosticSeverity.Warning,
-            Code = "FENCED_BLOCK_NESTING_INVALID",
-            Message = $"内层围栏用了 {quoteCount} 个引号、外层只有 {outerCount} 个，无法嵌套：" +
-                      "内层开围栏已按正文原样保留，内层闭合行会提前结束外层。" +
-                      $"请把外层改成 {quoteCount + 1} 个引号，或把内层减到 {outerCount - 1} 个。",
-            Range = range,
-        });
-    }
-
-    private static int EnclosingFenceCount(Block block) => block.Parent switch
-    {
-        CollapseBlock collapse => collapse.FenceCount,
-        TocpicBlock tocpic => tocpic.FenceCount,
-        _ => 0,
-    };
-
     /// <summary>块内列表的最大嵌套层数；无序、有序列表同等计入。</summary>
     private static int ComputeListDepth(IReadOnlyList<MarkdownNode> nodes)
     {
@@ -288,8 +195,6 @@ public sealed class MarkdigToNodeConverter
     {
         var range = BlockRangeProjector.Get(block);
 
-        ReportNestedFenceMismatch(block, range, diagnostics);
-
         switch (block)
         {
             case HeadingBlock heading:
@@ -303,7 +208,6 @@ public sealed class MarkdigToNodeConverter
                 var paragraphNode = _nodeFactory.Create(NodeType.Paragraph, NodeCategory.Block, range: range);
                 ProcessInlines(paragraph.Inline, paragraphNode, diagnostics);
                 paragraphNode.Text = GetInlineText(paragraphNode);
-                ReportRejectedNestedFence(paragraph, paragraphNode.Text, range, diagnostics);
                 return paragraphNode;
 
             case ListBlock listBlock:
@@ -703,6 +607,23 @@ public sealed class MarkdigToNodeConverter
                         DividerSyntax.LineAttribute,
                         dividerBlock.Dashed ? DividerSyntax.LineDashed : DividerSyntax.LineSolid);
                     return dividerNode;
+                }
+
+            case AnchorMatrixBlock anchorMatrix:
+                {
+                    var matrixNode = _nodeFactory.Create(
+                        NodeType.AnchorMatrix,
+                        NodeCategory.Leaf,
+                        text: anchorMatrix.RawText,
+                        range: range);
+
+                    matrixNode.SetDerivedAttribute(
+                        AnchorMatrixSyntax.DepthAttribute,
+                        anchorMatrix.Depth.ToString());
+                    matrixNode.SetDerivedAttribute(
+                        AnchorMatrixSyntax.ColsAttribute,
+                        anchorMatrix.Cols.ToString());
+                    return matrixNode;
                 }
 
             case ThematicBreakBlock:

@@ -306,6 +306,16 @@
     </structure>
   </element>
 
+  <!-- 锚点矩阵：自动收集文档标题，按 depth 截断、按 cols 分列，整格是可跳转链接；
+       悬浮预览/平滑滚动/焦点交接由预览脚本对站内锚点的统一增强接管。 -->
+  <element id="builtin-anchor-matrix" applies-to="AnchorMatrix">
+    <structure>
+      <part slot="root" addressable="false" tag="nav" class="md-anchor-matrix"
+            generator="anchor-matrix" css="anchor-matrix-vars"
+            attr="literal:文章锚点@aria-label"/>
+    </structure>
+  </element>
+
   <element id="builtin-qrcode" applies-to="QrCode">
     <structure>
       <part slot="root" addressable="false" tag="figure" class="qrcode-block" class-recipe="qrcode-state"

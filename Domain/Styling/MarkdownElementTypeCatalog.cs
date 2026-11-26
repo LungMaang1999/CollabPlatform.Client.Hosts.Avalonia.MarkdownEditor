@@ -65,6 +65,9 @@ public static class MarkdownElementTypeCatalog
         new(NodeType.Divider, "文本分割线", CategoryStructure, ElementRenderMode.Visible, true,
             "--- 文本 ---\n\n--- 虚线 --- {line=dashed}",
             "中间带文字/表情/符号的分割线，两侧细线；尾部 {line=dashed} 切换虚线。"),
+        new(NodeType.AnchorMatrix, "锚点矩阵", CategoryStructure, ElementRenderMode.Visible, true,
+            "# 起手\n\n[anchor-matrix depth=3 cols=3]\n\n## 快速开始\n\n安装后打开示例文档。\n\n## 深入配置\n\n按类型调整字体与配色。",
+            "自动从文档标题生成卡片网格，复用目录的 slug 与同名标题规则；depth 控制标题层级，cols 控制宽屏列数，整格可点。"),
         new(NodeType.YamlFrontMatter, "元数据", CategoryStructure, ElementRenderMode.Hidden, false,
             "---\ntitle: 示例\n---", "YAML 前言，只参与元数据解析，不进入正文渲染。"),
 
@@ -155,8 +158,8 @@ public static class MarkdownElementTypeCatalog
             "'''radar title=产品对比\n| 维度 | A |\n| x | 1 |\n'''", "三撇围栏雷达图，表格首列是维度、其余列是数据系列。"),
         new(NodeType.Collapse, "折叠块", CategoryExtension, ElementRenderMode.Visible, true,
             "'''collapse 标题\n正文\n'''",
-            "三撇围栏折叠块，正文按 Markdown 解析。嵌套时外层引号数必须多于内层（外 4 内 3），" +
-            "同层引号数会被当成提前闭合，内层开围栏会按正文原样保留。"),
+            "三撇围栏折叠块，正文按 Markdown 解析。嵌套闭合按最内层优先，外层与内层可以同用 3 个引号；" +
+            "外层多引号、内层少引号（外 4 内 3）的旧写法同样成立。"),
 
         new(NodeType.PoemTitle, "诗题", CategoryPoem, ElementRenderMode.Marker, true,
             "'''poem\ntitle: 静夜思\n---\n床前明月光\n'''", "古诗块内的合成部件，仅承载自身局部样式。"),

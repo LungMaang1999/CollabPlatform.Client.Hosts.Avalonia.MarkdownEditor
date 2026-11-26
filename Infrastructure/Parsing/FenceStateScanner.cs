@@ -72,10 +72,12 @@ internal static class FenceStateScanner
                     // 用户块内部允许继续嵌套传统围栏或其他用户块。
                     stack.Add(new OpenFence(userFenceChar, userFenceLength, lineIndex + 1, AllowsNesting: true));
                 }
-                else if (TryOpenFence(source, pos, contentEnd, out var openedChar, out var openedLength))
+                else if (TryOpenFence(
+                        source, pos, contentEnd,
+                        out var openedChar, out var openedLength, out var allowsNesting))
                 {
-                    // 内置围栏（含内置单引号关键字围栏）内部一律视为内容，不再嵌套。
-                    stack.Add(new OpenFence(openedChar, openedLength, lineIndex + 1, AllowsNesting: false));
+                    // 折叠/目录是容器围栏，体内可以继续嵌套（同长度也成立）；叶围栏与代码围栏内部仍是纯内容。
+                    stack.Add(new OpenFence(openedChar, openedLength, lineIndex + 1, allowsNesting));
                 }
             }
 
@@ -96,10 +98,12 @@ internal static class FenceStateScanner
         int start,
         int end,
         out char fenceChar,
-        out int fenceLength)
+        out int fenceLength,
+        out bool allowsNesting)
     {
         fenceChar = '\0';
         fenceLength = 0;
+        allowsNesting = false;
 
         var i = start;
         var spaces = 0;
@@ -134,6 +138,9 @@ internal static class FenceStateScanner
             {
                 return false;
             }
+
+            // 折叠/目录是容器围栏：体内允许继续嵌套，未闭合时要能定位到最内层。
+            allowsNesting = IsContainerKeyword(rest);
         }
 
         // 反引号围栏的 info string 不允许再含反引号（Markdig 规则），
@@ -266,4 +273,12 @@ internal static class FenceStateScanner
     private static bool IsCustomFenceKeyword(string text) =>
         FenceKeywordRegistry.BuiltIn.TryMatchPrefix(FenceFamily.PrimeFence, text, out _, out _)
         || FenceKeywordRegistry.IsReservedPrimeKeyword(text);
+
+    /// <summary>关键字是否为可嵌套的容器围栏（折叠、目录）。</summary>
+    private static bool IsContainerKeyword(string text) =>
+        StartsWithWord(text, "collapse") || StartsWithWord(text, "tocpic");
+
+    private static bool StartsWithWord(string text, string word) =>
+        text.StartsWith(word, StringComparison.OrdinalIgnoreCase)
+        && (text.Length == word.Length || char.IsWhiteSpace(text[word.Length]));
 }

@@ -9,6 +9,12 @@ public interface IFencedBlock
 {
     /// <summary>0-based source line index of the closing fence, when matched.</summary>
     int? ClosingFenceLineIndex { get; set; }
+
+    /// <summary>
+    /// 预扫描计划中的围栏层级（从 1 开始）；0 表示该行不在计划内（缩进列表/引用等），
+    /// 此时闭合退回旧的「引号数不少于自身」规则。
+    /// </summary>
+    int NestingDepth { get; set; }
 }
 
 /// <summary>
@@ -125,6 +131,8 @@ public sealed class FenceDispatchParser : BlockParser
         block.Column = processor.Column;
         block.Span = new SourceSpan(processor.Start, line.End);
         block.Lines = new StringLineGroup(4);
+        ((IFencedBlock)block).NestingDepth =
+            FenceNestingPlan.FromContext(processor.Context)?.GetOpenDepth(processor.LineIndex) ?? 0;
 
         processor.NewBlocks.Push(block);
         return BlockState.ContinueDiscard;
@@ -148,12 +156,26 @@ public sealed class FenceDispatchParser : BlockParser
             line.NextChar();
         }
 
+        var fenced = (IFencedBlock)block;
+        var plan = FenceNestingPlan.FromContext(processor.Context);
+        if (fenced.NestingDepth > 0 && plan is not null)
+        {
+            if (plan.GetCloseDepth(processor.LineIndex) == fenced.NestingDepth)
+            {
+                fenced.ClosingFenceLineIndex = processor.LineIndex;
+                block.UpdateSpanEnd(line.Start);
+                return BlockState.BreakDiscard;
+            }
+
+            return BlockState.Continue;
+        }
+
         if (closeCount >= 3)
         {
             var tail = line.ToString().Trim();
             if (tail.Length == 0)
             {
-                ((IFencedBlock)block).ClosingFenceLineIndex = processor.LineIndex;
+                fenced.ClosingFenceLineIndex = processor.LineIndex;
                 block.UpdateSpanEnd(line.Start);
                 return BlockState.BreakDiscard;
             }

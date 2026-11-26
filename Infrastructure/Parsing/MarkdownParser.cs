@@ -151,6 +151,7 @@ public sealed class MarkdownParser : IMarkdownParser
         // 带中间文字的分割线 `--- 文本 ---`：必须在 ThematicBreakParser 之前看到同一行；
         // 标签为空时 TryOpen 返回 None，普通 `---` 的输出与解析结果保持原样。
         pipelineBuilder.BlockParsers.Insert(0, new DividerParser());
+        pipelineBuilder.BlockParsers.Insert(0, new AnchorMatrixParser());
 
         // 解析声明的唯一装载路径：内置数据面（builtin-elements.xml）与文档定义先合并，
         // 再同时喂给关键字表与条目标记表。内置与用户不是两套入口，差别只在合并顺序：
