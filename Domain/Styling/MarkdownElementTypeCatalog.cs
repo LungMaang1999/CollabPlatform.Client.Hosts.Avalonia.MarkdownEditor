@@ -154,7 +154,9 @@ public static class MarkdownElementTypeCatalog
         new(NodeType.Radar, "雷达图", CategoryExtension, ElementRenderMode.Visible, true,
             "'''radar title=产品对比\n| 维度 | A |\n| x | 1 |\n'''", "三撇围栏雷达图，表格首列是维度、其余列是数据系列。"),
         new(NodeType.Collapse, "折叠块", CategoryExtension, ElementRenderMode.Visible, true,
-            "'''collapse 标题\n正文\n'''", "三撇围栏折叠块，正文按 Markdown 解析，可逐层减少引号数嵌套。"),
+            "'''collapse 标题\n正文\n'''",
+            "三撇围栏折叠块，正文按 Markdown 解析。嵌套时外层引号数必须多于内层（外 4 内 3），" +
+            "同层引号数会被当成提前闭合，内层开围栏会按正文原样保留。"),
 
         new(NodeType.PoemTitle, "诗题", CategoryPoem, ElementRenderMode.Marker, true,
             "'''poem\ntitle: 静夜思\n---\n床前明月光\n'''", "古诗块内的合成部件，仅承载自身局部样式。"),
