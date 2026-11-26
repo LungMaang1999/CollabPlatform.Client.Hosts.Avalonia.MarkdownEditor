@@ -263,7 +263,7 @@
             <part slot="anchor" role="meta" addressable="false" tag="a" policy="backlink"
                   class="footnote-backref"
                   attr="ref:backref-href@href ref:backref-item@data-footnote-target
-                        ref:backref-title@title ref:backref-aria-label@aria-label">
+                        ref:backref-aria-label@aria-label">
               <part slot="backref-icon" role="meta" addressable="false" tag="span"
                     class="footnote-backref-icon" content="backref-icon"/>
             </part>
